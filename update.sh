@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # GitNexus upstream update for the local embedded repo.
+# Configures MCP for Antigravity, Claude CLI, and Codex CLI.
 #
 # Usage: ./update.sh
 set -euo pipefail
@@ -24,6 +25,7 @@ ANTIGRAVITY_SKILLS_DIR="$HOME/.gemini/antigravity/skills"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 CLAUDE_CLI_MCP="$HOME/.claude.json"
+CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
 UPSTREAM_REPO="https://github.com/abhigyanpatwari/GitNexus.git"
 TMP_DIR=""
 
@@ -405,6 +407,76 @@ print(action)
   esac
 }
 
+# ── Configure Codex CLI MCP ──────────────────────────────────────────
+configure_codex() {
+  step "Configuring Codex CLI MCP"
+
+  local codex_config="$CODEX_CONFIG_DIR/config.toml"
+
+  if [ ! -d "$CODEX_CONFIG_DIR" ]; then
+    warn "Codex CLI not installed — skipping"
+    return
+  fi
+
+  if ! command -v python3 &>/dev/null; then
+    warn "python3 not found — add gitnexus MCP manually to $codex_config"
+    return
+  fi
+
+  [ -f "$codex_config" ] || touch "$codex_config"
+
+  local action
+  action=$(python3 -c "
+import sys
+
+config_path = sys.argv[1]
+with open(config_path) as f:
+    lines = f.readlines()
+
+section_start = -1
+section_end = len(lines)
+for i, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped.startswith('[') and not stripped.startswith('[\"') and not stripped.startswith(\"['\"):
+        if stripped == '[mcp_servers.gitnexus]':
+            section_start = i
+        elif section_start >= 0:
+            section_end = i
+            break
+
+if section_start >= 0:
+    section_lines = lines[section_start+1:section_end]
+    has_correct_cmd = any('command' in l and '\"gitnexus\"' in l and 'npx' not in l for l in section_lines)
+    has_correct_args = any('args' in l and '\"mcp\"' in l and 'gitnexus' not in l for l in section_lines)
+    if has_correct_cmd and has_correct_args:
+        print('unchanged')
+        sys.exit(0)
+
+    new_section = ['command = \"gitnexus\"\n', 'args = [ \"mcp\" ]\n']
+    for line in section_lines:
+        stripped = line.strip()
+        if stripped.startswith('command =') or stripped.startswith('args ='):
+            continue
+        if stripped.startswith('[\"') or stripped.startswith(\"['\"):
+            continue
+        new_section.append(line)
+    lines[section_start+1:section_end] = new_section
+    print('updated')
+else:
+    lines.append('\n[mcp_servers.gitnexus]\ncommand = \"gitnexus\"\nargs = [ \"mcp\" ]\n')
+    print('added')
+
+with open(config_path, 'w') as f:
+    f.writelines(lines)
+" "$codex_config")
+
+  case "$action" in
+    added)     ok "Codex CLI MCP entry added" ;;
+    updated)   ok "Codex CLI MCP entry updated" ;;
+    unchanged) ok "Codex CLI MCP already configured" ;;
+  esac
+}
+
 apply_custom_skills() {
   [ -d "$CUSTOM_SKILLS_DIR" ] || return 0
 
@@ -470,6 +542,7 @@ main() {
     apply_unity_command_patch
     apply_custom_skills
     configure_claude_cli
+    configure_codex
     return
   fi
 
@@ -481,6 +554,7 @@ main() {
   apply_unity_command_patch
   apply_custom_skills
   configure_claude_cli
+  configure_codex
   install_dependencies
   build_and_link_cli
 
