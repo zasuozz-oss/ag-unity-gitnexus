@@ -23,6 +23,7 @@ CUSTOM_SKILLS_DIR="$SCRIPT_DIR/custom/skills"
 ANTIGRAVITY_SKILLS_DIR="$HOME/.gemini/antigravity/skills"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
 CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
+CLAUDE_CLI_MCP="$HOME/.claude.json"
 UPSTREAM_REPO="https://github.com/abhigyanpatwari/GitNexus.git"
 TMP_DIR=""
 
@@ -352,6 +353,58 @@ PY
   ok "Unity custom files copied and command patch applied"
 }
 
+configure_claude_cli() {
+  step "Configuring Claude CLI MCP"
+
+  if ! command -v claude &>/dev/null; then
+    warn "Claude CLI not installed — skipping"
+    return
+  fi
+
+  if ! command -v python3 &>/dev/null; then
+    warn "python3 not found — add manually to $CLAUDE_CLI_MCP"
+    return
+  fi
+
+  [ -s "$CLAUDE_CLI_MCP" ] || echo '{"mcpServers":{}}' > "$CLAUDE_CLI_MCP"
+
+  local action
+  action=$(python3 -c "
+import json, sys
+
+path = sys.argv[1]
+
+with open(path) as f:
+    cfg = json.load(f)
+
+servers = cfg.setdefault('mcpServers', {})
+expected = {
+    'command': 'gitnexus',
+    'args': ['mcp']
+}
+existing = servers.get('gitnexus')
+
+if existing == expected:
+    print('unchanged')
+    sys.exit(0)
+
+action = 'updated' if existing else 'added'
+servers['gitnexus'] = expected
+
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+
+print(action)
+" "$CLAUDE_CLI_MCP")
+
+  case "$action" in
+    added)     ok "Claude CLI MCP entry added" ;;
+    updated)   ok "Claude CLI MCP entry updated" ;;
+    unchanged) ok "Claude CLI MCP already configured" ;;
+  esac
+}
+
 apply_custom_skills() {
   [ -d "$CUSTOM_SKILLS_DIR" ] || return 0
 
@@ -416,6 +469,7 @@ main() {
     ensure_layout
     apply_unity_command_patch
     apply_custom_skills
+    configure_claude_cli
     return
   fi
 
@@ -426,6 +480,7 @@ main() {
   sync_upstream
   apply_unity_command_patch
   apply_custom_skills
+  configure_claude_cli
   install_dependencies
   build_and_link_cli
 

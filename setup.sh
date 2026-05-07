@@ -19,6 +19,7 @@ step()  { echo -e "\n${CYAN}── $* ──${NC}"; }
 
 # ── Config ───────────────────────────────────────────────────
 ANTIGRAVITY_MCP="$HOME/.gemini/antigravity/mcp_config.json"
+CLAUDE_CLI_MCP="$HOME/.claude.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITNEXUS_DIR="$SCRIPT_DIR/GitNexus"
 GITNEXUS_WEB_DIR="$GITNEXUS_DIR/gitnexus-web"
@@ -176,6 +177,59 @@ print(action)
     added)     ok "Claude Desktop MCP entry added" ;;
     updated)   ok "Claude Desktop MCP entry updated" ;;
     unchanged) ok "Claude Desktop MCP already configured" ;;
+  esac
+}
+
+# ── Configure Claude CLI MCP ─────────────────────────────────
+configure_claude_cli() {
+  step "Configuring Claude CLI MCP"
+
+  if ! command -v claude &>/dev/null; then
+    warn "Claude CLI not installed — skipping"
+    return
+  fi
+
+  if ! command -v python3 &>/dev/null; then
+    warn "python3 not found — add manually to $CLAUDE_CLI_MCP"
+    return
+  fi
+
+  [ -s "$CLAUDE_CLI_MCP" ] || echo '{"mcpServers":{}}' > "$CLAUDE_CLI_MCP"
+
+  local action
+  action=$(python3 -c "
+import json, sys
+
+path = sys.argv[1]
+
+with open(path) as f:
+    cfg = json.load(f)
+
+servers = cfg.setdefault('mcpServers', {})
+expected = {
+    'command': 'gitnexus',
+    'args': ['mcp']
+}
+existing = servers.get('gitnexus')
+
+if existing == expected:
+    print('unchanged')
+    sys.exit(0)
+
+action = 'updated' if existing else 'added'
+servers['gitnexus'] = expected
+
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+
+print(action)
+" "$CLAUDE_CLI_MCP")
+
+  case "$action" in
+    added)     ok "Claude CLI MCP entry added" ;;
+    updated)   ok "Claude CLI MCP entry updated" ;;
+    unchanged) ok "Claude CLI MCP already configured" ;;
   esac
 }
 
@@ -414,6 +468,7 @@ main() {
   check_prereqs
   configure_mcp
   configure_claude_desktop
+  configure_claude_cli
   configure_codex
   fork_web_ui
   install_global_skills
@@ -432,7 +487,7 @@ main() {
   echo -e "  ${DIM}Update${NC}         ./update.sh"
   echo -e "  ${DIM}Re-run setup${NC}   ./setup.sh"
   echo ""
-  echo -e "  ${YELLOW}→ Restart Antigravity, Claude Desktop, and Codex to load MCP${NC}"
+  echo -e "  ${YELLOW}→ Restart Antigravity, Claude Desktop, Claude CLI, and Codex to load MCP${NC}"
   echo ""
 }
 
