@@ -54,7 +54,7 @@ function resolveGitnexusBin(): string | null {
  * >60 s, exceeding Claude Code's 30 s MCP connection timeout).
  *
  * Falls back to npx when the binary isn't on PATH — e.g. first-time
- * users who ran `npx gitnexus analyze` but haven't done `npm i -g`.
+ * users who ran `gitnexus analyze` but haven't done `npm i -g`.
  */
 function getMcpEntry() {
   const bin = resolveGitnexusBin();

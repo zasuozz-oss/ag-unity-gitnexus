@@ -14,7 +14,7 @@ npm install
 npm run build
 ```
 
-Use `npx gitnexus …` from any path after global/published install, or `node dist/cli/index.js …` when developing from `gitnexus/` with a local build.
+Use `gitnexus …` from any path after global/published install, or `node dist/cli/index.js …` when developing from `gitnexus/` with a local build.
 
 ---
 
@@ -25,25 +25,25 @@ Use `npx gitnexus …` from any path after global/published install, or `node di
 **Fix (from the target repo root):**
 
 ```bash
-npx gitnexus analyze
+gitnexus analyze
 ```
 
 **Force full rebuild** (same commit but suspect corruption or changed ignore rules):
 
 ```bash
-npx gitnexus analyze --force
+gitnexus analyze --force
 ```
 
 **Check status:**
 
 ```bash
-npx gitnexus status
+gitnexus status
 ```
 
 **List what MCP knows about:**
 
 ```bash
-npx gitnexus list
+gitnexus list
 ```
 
 ---
@@ -53,7 +53,7 @@ npx gitnexus list
 **First time with vectors** (slower, more disk/RAM):
 
 ```bash
-npx gitnexus analyze --embeddings
+gitnexus analyze --embeddings
 ```
 
 **Important:** If you already had embeddings, **always** pass `--embeddings` on later analyzes, or they can be dropped. See `stats.embeddings` in `.gitnexus/meta.json` (0 means none).
@@ -70,7 +70,7 @@ npx gitnexus analyze --embeddings
 
 ```bash
 cd /path/to/repo
-npx gitnexus analyze
+gitnexus analyze
 ```
 
 Restart the editor MCP session if needed. The server **refreshes the registry lazily**; new analyzes are picked up without necessarily reinstalling MCP.
@@ -84,22 +84,22 @@ Restart the editor MCP session if needed. The server **refreshes the registry la
 **Current repo only** (prompts for confirmation):
 
 ```bash
-npx gitnexus clean
+gitnexus clean
 ```
 
 **Skip confirmation:**
 
 ```bash
-npx gitnexus clean --force
+gitnexus clean --force
 ```
 
 **All registered repos:**
 
 ```bash
-npx gitnexus clean --all --force
+gitnexus clean --all --force
 ```
 
-Then re-run `npx gitnexus analyze` (and `--embeddings` if you need vectors).
+Then re-run `gitnexus analyze` (and `--embeddings` if you need vectors).
 
 ---
 
@@ -107,7 +107,7 @@ Then re-run `npx gitnexus analyze` (and `--embeddings` if you need vectors).
 
 ```bash
 cd gitnexus
-npx gitnexus serve
+gitnexus serve
 # default http://127.0.0.1:4747 — see serve --help for port/host
 ```
 
@@ -121,10 +121,10 @@ Useful for debugging without an editor:
 
 ```bash
 cd gitnexus
-npx gitnexus query "authentication flow" --repo MyRepo
-npx gitnexus context SomeSymbol --repo MyRepo
-npx gitnexus impact SomeSymbol --direction upstream --repo MyRepo
-npx gitnexus cypher "MATCH (n) RETURN count(n) LIMIT 1" --repo MyRepo
+gitnexus query "authentication flow" --repo MyRepo
+gitnexus context SomeSymbol --repo MyRepo
+gitnexus impact SomeSymbol --direction upstream --repo MyRepo
+gitnexus cypher "MATCH (n) RETURN count(n) LIMIT 1" --repo MyRepo
 ```
 
 ---

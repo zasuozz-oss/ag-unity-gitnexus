@@ -19,12 +19,12 @@ AI coding tools don't understand your codebase structure. They edit a function w
 
 ```bash
 # Index your repo (run from repo root)
-npx gitnexus analyze
+gitnexus analyze
 ```
 
 That's it. This indexes the codebase, installs agent skills, registers Claude Code hooks, and creates `AGENTS.md` / `CLAUDE.md` context files — all in one command.
 
-To configure MCP for your editor, run `npx gitnexus setup` once — or set it up manually below.
+To configure MCP for your editor, run `gitnexus setup` once — or set it up manually below.
 
 `gitnexus setup` auto-detects your editors and writes the correct global MCP config. You only need to run it once.
 
@@ -309,10 +309,10 @@ Configure the behavior with two environment variables:
 
 ```bash
 # Offline/airgapped: never reach the network for extensions
-GITNEXUS_LBUG_EXTENSION_INSTALL=load-only npx gitnexus analyze
+GITNEXUS_LBUG_EXTENSION_INSTALL=load-only gitnexus analyze
 
 # Slow network: give extension downloads more time
-GITNEXUS_LBUG_EXTENSION_INSTALL_TIMEOUT_MS=30000 npx gitnexus analyze
+GITNEXUS_LBUG_EXTENSION_INSTALL_TIMEOUT_MS=30000 gitnexus analyze
 ```
 
 ### Analysis runs out of memory
@@ -321,7 +321,7 @@ For very large repositories:
 
 ```bash
 # Increase Node.js heap size
-NODE_OPTIONS="--max-old-space-size=16384" npx gitnexus analyze
+NODE_OPTIONS="--max-old-space-size=16384" gitnexus analyze
 
 # Exclude large directories
 echo "vendor/" >> .gitnexusignore
@@ -334,11 +334,11 @@ By default the walker skips files larger than **512 KB** (see log line `Skipped 
 
 ```bash
 # CLI flag (takes precedence over the env var)
-npx gitnexus analyze --max-file-size 2048     # skip only files > 2 MB
+gitnexus analyze --max-file-size 2048     # skip only files > 2 MB
 
 # Environment variable (persists across commands)
 export GITNEXUS_MAX_FILE_SIZE=2048
-npx gitnexus analyze
+gitnexus analyze
 ```
 
 Values above **32768 KB (32 MB)** are clamped to the tree-sitter parser ceiling; invalid values fall back to the 512 KB default with a one-time warning. When an override is active, `analyze` prints the effective threshold in its startup banner (e.g. `GITNEXUS_MAX_FILE_SIZE: effective threshold 2048KB (default 512KB)`).
@@ -349,11 +349,11 @@ Worker parse timeouts are recoverable. GitNexus retries stalled worker jobs with
 
 ```bash
 # CLI flag, in seconds
-npx gitnexus analyze --worker-timeout 60
+gitnexus analyze --worker-timeout 60
 
 # Environment variable, in milliseconds
 export GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS=60000
-npx gitnexus analyze
+gitnexus analyze
 ```
 
 For repositories with very large source files, `GITNEXUS_WORKER_SUB_BATCH_MAX_BYTES` controls the worker job byte budget. The default is **8388608 bytes (8 MB)**.

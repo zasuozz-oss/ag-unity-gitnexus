@@ -356,6 +356,95 @@ PY
   ok "Unity custom files copied and command patch applied"
 }
 
+apply_cli_command_patch() {
+  step "Applying local CLI command customizations"
+
+  local patched
+  patched=$(python3 - "$SCRIPT_DIR" "$GITNEXUS_DIR" "$CUSTOM_SKILLS_DIR" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+script_dir = Path(sys.argv[1])
+gitnexus_dir = Path(sys.argv[2])
+custom_skills_dir = Path(sys.argv[3])
+
+text_suffixes = {
+    ".cjs",
+    ".js",
+    ".json",
+    ".md",
+    ".mjs",
+    ".ts",
+    ".tsx",
+}
+
+roots = [
+    script_dir / "AGENTS.md",
+    script_dir / "CLAUDE.md",
+    custom_skills_dir,
+    gitnexus_dir / ".claude" / "skills" / "gitnexus",
+    gitnexus_dir / "AGENTS.md",
+    gitnexus_dir / "CHANGELOG.md",
+    gitnexus_dir / "GUARDRAILS.md",
+    gitnexus_dir / "MIGRATION.md",
+    gitnexus_dir / "README.md",
+    gitnexus_dir / "RUNBOOK.md",
+    gitnexus_dir / "docs" / "guides" / "microservices-grpc.md",
+    gitnexus_dir / "gitnexus" / "README.md",
+    gitnexus_dir / "gitnexus" / "dist" / "cli",
+    gitnexus_dir / "gitnexus" / "dist" / "mcp",
+    gitnexus_dir / "gitnexus" / "hooks" / "claude",
+    gitnexus_dir / "gitnexus" / "skills",
+    gitnexus_dir / "gitnexus" / "src" / "cli",
+    gitnexus_dir / "gitnexus" / "src" / "mcp",
+    gitnexus_dir / "gitnexus" / "test" / "integration" / "hooks-e2e.test.ts",
+    gitnexus_dir / "gitnexus-claude-plugin" / "hooks",
+    gitnexus_dir / "gitnexus-claude-plugin" / "skills",
+    gitnexus_dir / "gitnexus-cursor-integration" / "skills",
+]
+
+def iter_files(root: Path):
+    if not root.exists():
+        return
+    if root.is_file():
+        if root.suffix in text_suffixes:
+            yield root
+        return
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix in text_suffixes:
+            yield path
+
+def normalize(text: str) -> str:
+    text = re.sub(r"\bnpx gitnexus(?!@)", "gitnexus", text)
+    text = text.replace("`gitnexus`, `gitnexus`, or", "`gitnexus` or")
+    text = text.replace("`gitnexus` or `gitnexus`", "`gitnexus`")
+    return text
+
+patched = 0
+seen: set[Path] = set()
+for root in roots:
+    for path in iter_files(root):
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            original = path.read_text()
+        except UnicodeDecodeError:
+            continue
+        updated = normalize(original)
+        if updated != original:
+            path.write_text(updated)
+            patched += 1
+
+print(patched)
+PY
+)
+
+  ok "CLI command references normalized to gitnexus ($patched files)"
+}
+
 configure_claude_cli() {
   step "Configuring Claude CLI MCP"
 
@@ -541,6 +630,7 @@ main() {
   if [ "${1:-}" = "--apply-custom-only" ]; then
     ensure_layout
     apply_unity_command_patch
+    apply_cli_command_patch
     apply_custom_skills
     configure_claude_cli
     configure_codex
@@ -553,6 +643,7 @@ main() {
   ensure_layout
   sync_upstream
   apply_unity_command_patch
+  apply_cli_command_patch
   apply_custom_skills
   configure_claude_cli
   configure_codex
@@ -561,8 +652,8 @@ main() {
 
   echo ""
   echo -e "${GREEN}Update complete${NC}"
-  echo -e "  ${DIM}Unity${NC}    gitnexus unity analyze --embeddings --skills"
-  echo -e "  ${DIM}Generic${NC}  gitnexus analyze --embeddings --skills"
+  echo -e "  ${DIM}Unity${NC}    gitnexus unity analyze --embeddings"
+  echo -e "  ${DIM}Generic${NC}  gitnexus analyze --embeddings"
   echo -e "  ${DIM}Web UI${NC}   ./web-ui.sh"
 }
 

@@ -99,12 +99,12 @@ The CLI indexes your repository and runs an MCP server that gives AI agents deep
 
 ```bash
 # Index your repo (run from repo root)
-npx gitnexus analyze
+gitnexus analyze
 ```
 
 That's it. This indexes the codebase, installs agent skills, registers Claude Code hooks, and creates `AGENTS.md` / `CLAUDE.md` context files — all in one command.
 
-To configure MCP for your editor, run `npx gitnexus setup` once — or set it up manually below.
+To configure MCP for your editor, run `gitnexus setup` once — or set it up manually below.
 
 ### MCP Setup
 

@@ -15,7 +15,7 @@ This guide is for teams whose product lives in **several separate Git repositori
 
 ## Prerequisites
 
-- GitNexus installed and runnable as `gitnexus` or `npx gitnexus` (see the root [README.md](../../README.md)).
+- GitNexus installed and runnable as `gitnexus` (see the root [README.md](../../README.md)).
 - Each service repository checked out locally. No requirement that they share a parent directory — the group references them by registry name.
 - Write access to `~/.gitnexus/` (the default gitnexus home; see `getDefaultGitnexusDir` in [`storage.ts`](../../gitnexus/src/core/group/storage.ts)).
 
@@ -28,9 +28,9 @@ The example uses three services — a TypeScript API gateway, a Go orders servic
 Run `analyze` from inside each service repo (or pass the path). The CLI surface lives in [`gitnexus/src/cli/analyze.ts`](../../gitnexus/src/cli/analyze.ts) and is wired in [`gitnexus/src/cli/index.ts`](../../gitnexus/src/cli/index.ts).
 
 ```bash
-cd ~/code/gateway && npx gitnexus analyze
-cd ~/code/orders  && npx gitnexus analyze
-cd ~/code/inventory && npx gitnexus analyze
+cd ~/code/gateway && gitnexus analyze
+cd ~/code/orders  && gitnexus analyze
+cd ~/code/inventory && gitnexus analyze
 ```
 
 Useful flags:
@@ -40,14 +40,14 @@ Useful flags:
 - `--name <alias>` — register the repo under a specific alias when two repos share a basename (e.g. two `api/` folders).
 - `--skip-git` — index a checkout that isn't a git repo.
 
-Each run writes a `.gitnexus/` folder in the repo and registers the repo in `~/.gitnexus/registry.json`. Confirm with `npx gitnexus list`.
+Each run writes a `.gitnexus/` folder in the repo and registers the repo in `~/.gitnexus/registry.json`. Confirm with `gitnexus list`.
 
 ### 2. Author `group.yaml`
 
 Create the group directory and edit the config. Either use the CLI scaffolder or write the file directly — both produce the same shape consumed by [`config-parser.ts`](../../gitnexus/src/core/group/config-parser.ts).
 
 ```bash
-npx gitnexus group create payments-platform
+gitnexus group create payments-platform
 # or manually:
 mkdir -p ~/.gitnexus/groups/payments-platform
 $EDITOR   ~/.gitnexus/groups/payments-platform/group.yaml
@@ -88,7 +88,7 @@ Field notes (schema in [`types.ts`](../../gitnexus/src/core/group/types.ts)):
 
 - `version` — must be `1`. The parser rejects anything else.
 - `name` — required; used for the group directory name and all CLI / MCP calls.
-- `repos` — a mapping from **group path** (a logical name you choose; can be a hierarchy like `backend/orders`) to **registry name** (the name shown by `npx gitnexus list`). Both sides appear throughout the tooling: contract rows use the group path; `@<group>/<groupPath>` routes tools to a single member.
+- `repos` — a mapping from **group path** (a logical name you choose; can be a hierarchy like `backend/orders`) to **registry name** (the name shown by `gitnexus list`). Both sides appear throughout the tooling: contract rows use the group path; `@<group>/<groupPath>` routes tools to a single member.
 - `links` — optional manifest escape hatch, one entry per explicit cross-repo contract. Validated by the parser: `from` and `to` must be known repo paths, `type` must be one of `http | grpc | topic | lib | custom`, and `role` must be `provider | consumer`.
 - `detect` — toggles per extractor family. Defaults (set in `config-parser.ts`) turn `http`, `grpc`, `topics`, and `shared_libs` on; disable the ones you don't use to speed up sync.
 - `matching` — thresholds for the matching cascade. The exact match is always run; other strategies depend on indexer state.
@@ -96,7 +96,7 @@ Field notes (schema in [`types.ts`](../../gitnexus/src/core/group/types.ts)):
 ### 3. Sync the group
 
 ```bash
-npx gitnexus group sync payments-platform --verbose
+gitnexus group sync payments-platform --verbose
 ```
 
 What this does (see [`sync.ts`](../../gitnexus/src/core/group/sync.ts)):
@@ -121,7 +121,7 @@ The same operation is available over MCP as `group_sync({ name: "payments-platfo
 Use `gitnexus group contracts` for the CLI view or read the `gitnexus://group/<name>/contracts` MCP resource for the same data.
 
 ```bash
-npx gitnexus group contracts payments-platform --type grpc --json
+gitnexus group contracts payments-platform --type grpc --json
 ```
 
 A shortened response:
@@ -161,7 +161,7 @@ A shortened response:
 }
 ```
 
-Staleness of the underlying indexes shows up in `npx gitnexus group status payments-platform` or the `gitnexus://group/<name>/status` resource.
+Staleness of the underlying indexes shows up in `gitnexus group status payments-platform` or the `gitnexus://group/<name>/status` resource.
 
 ### 5. Run cross-repo impact with `@<group>` routing
 
@@ -188,7 +188,7 @@ Example MCP calls:
 The CLI equivalents still exist for scripting:
 
 ```bash
-npx gitnexus group impact payments-platform \
+gitnexus group impact payments-platform \
   --repo orders --target PlaceOrder --direction upstream --cross-depth 2
 ```
 

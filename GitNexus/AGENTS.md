@@ -64,7 +64,7 @@ Commands and gotchas live under **Repo reference** below and in **[CONTRIBUTING.
 
 Indexed as **GitNexus** (4325 symbols, 10556 relationships, 300 execution flows). Use MCP tools to understand code, assess impact, and navigate safely.
 
-> If any tool warns the index is stale, run `npx gitnexus analyze` first.
+> If any tool warns the index is stale, run `gitnexus analyze` first.
 
 ## Always Do
 
@@ -149,9 +149,9 @@ Indexed as **GitNexus** (4325 symbols, 10556 relationships, 300 execution flows)
 ## Keeping the Index Fresh
 
 ```bash
-npx gitnexus analyze                 # basic refresh; preserves any existing embeddings
-npx gitnexus analyze --embeddings    # also generate embeddings for new/changed nodes
-npx gitnexus analyze --drop-embeddings  # explicit opt-in to wipe existing embeddings
+gitnexus analyze                 # basic refresh; preserves any existing embeddings
+gitnexus analyze --embeddings    # also generate embeddings for new/changed nodes
+gitnexus analyze --drop-embeddings  # explicit opt-in to wipe existing embeddings
 ```
 
 Check `.gitnexus/meta.json` `stats.embeddings` (0 = none). A plain `analyze` no longer drops existing vectors — pass `--drop-embeddings` to wipe.
@@ -189,7 +189,7 @@ Check `.gitnexus/meta.json` `stats.embeddings` (0 = none). A plain `analyze` no 
 ```bash
 cd gitnexus && npm run dev                 # CLI: tsx watch mode
 cd gitnexus-web && npm run dev             # Web UI: Vite on port 5173
-npx gitnexus serve                         # HTTP API on port 4747 (from any indexed repo)
+gitnexus serve                         # HTTP API on port 4747 (from any indexed repo)
 ```
 
 ### Testing

@@ -375,7 +375,9 @@ apply_gitnexus_customizations() {
     return
   fi
 
+  info "Delegating upstream-safe patches to update.sh --apply-custom-only"
   "$SCRIPT_DIR/update.sh" --apply-custom-only
+  ok "Local GitNexus customizations applied"
 }
 
 # ── Build & Link Local CLI ───────────────────────────────────
