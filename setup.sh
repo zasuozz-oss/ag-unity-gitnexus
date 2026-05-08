@@ -135,48 +135,33 @@ configure_claude_cli() {
     return
   fi
 
-  if ! command -v python3 &>/dev/null; then
-    warn "python3 not found — add manually to $CLAUDE_CLI_MCP"
+  # Resolve absolute paths for reliable MCP spawning
+  local node_path gitnexus_entry
+  node_path="$(command -v node)"
+  gitnexus_entry="$GITNEXUS_CLI_DIR/dist/cli/index.js"
+
+  if [ ! -f "$gitnexus_entry" ]; then
+    warn "GitNexus CLI not built yet — will configure after build step"
     return
   fi
 
-  [ -s "$CLAUDE_CLI_MCP" ] || echo '{"mcpServers":{}}' > "$CLAUDE_CLI_MCP"
+  # Check if gitnexus MCP is already registered in Claude CLI
+  if claude mcp get gitnexus &>/dev/null; then
+    ok "Claude CLI MCP already configured"
+    return
+  fi
 
-  local action
-  action=$(python3 -c "
-import json, sys
+  # Register using "claude mcp add" — the only way Claude CLI recognizes MCP servers
+  # Scope: user (global, not project-specific)
+  local mcp_json
+  mcp_json=$(printf '{"command":"%s","args":["%s","mcp"]}' "$node_path" "$gitnexus_entry")
 
-path = sys.argv[1]
-
-with open(path) as f:
-    cfg = json.load(f)
-
-servers = cfg.setdefault('mcpServers', {})
-expected = {
-    'command': 'gitnexus',
-    'args': ['mcp']
-}
-existing = servers.get('gitnexus')
-
-if existing == expected:
-    print('unchanged')
-    sys.exit(0)
-
-action = 'updated' if existing else 'added'
-servers['gitnexus'] = expected
-
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-    f.write('\n')
-
-print(action)
-" "$CLAUDE_CLI_MCP")
-
-  case "$action" in
-    added)     ok "Claude CLI MCP entry added" ;;
-    updated)   ok "Claude CLI MCP entry updated" ;;
-    unchanged) ok "Claude CLI MCP already configured" ;;
-  esac
+  if claude mcp add-json -s user gitnexus "$mcp_json" &>/dev/null; then
+    ok "Claude CLI MCP entry added (scope: user)"
+  else
+    warn "Failed to add gitnexus MCP to Claude CLI"
+    info "  Manual fix: claude mcp add -s user gitnexus -- $node_path $gitnexus_entry mcp"
+  fi
 }
 
 # ── Configure Codex MCP ──────────────────────────────────────
@@ -196,6 +181,11 @@ configure_codex() {
     return
   fi
 
+  # Resolve absolute paths for reliable MCP spawning
+  local node_path gitnexus_entry
+  node_path="$(command -v node)"
+  gitnexus_entry="$GITNEXUS_CLI_DIR/dist/cli/index.js"
+
   # Ensure config.toml exists
   [ -f "$codex_config" ] || touch "$codex_config"
 
@@ -204,6 +194,9 @@ configure_codex() {
 import sys
 
 config_path = sys.argv[1]
+node_path = sys.argv[2]
+gitnexus_entry = sys.argv[3]
+
 with open(config_path) as f:
     lines = f.readlines()
 
@@ -221,18 +214,20 @@ for i, line in enumerate(lines):
             section_end = i
             break
 
+expected_cmd = f'command = \"{node_path}\"'
+expected_args = f'args = [ \"{gitnexus_entry}\", \"mcp\" ]'
+
 if section_start >= 0:
-    # Check if already correct
+    # Check if already correct (absolute paths)
     section_lines = lines[section_start+1:section_end]
-    section_text = ''.join(section_lines)
-    has_correct_cmd = any('command' in l and '\"gitnexus\"' in l and 'npx' not in l for l in section_lines)
-    has_correct_args = any('args' in l and '\"mcp\"' in l and 'gitnexus' not in l for l in section_lines)
+    has_correct_cmd = any(expected_cmd in l for l in section_lines)
+    has_correct_args = any(expected_args in l for l in section_lines)
     if has_correct_cmd and has_correct_args:
         print('unchanged')
         sys.exit(0)
 
     # Replace command/args, keep other keys (env, tools, etc.)
-    new_section = ['command = \"gitnexus\"\n', 'args = [ \"mcp\" ]\n']
+    new_section = [f'{expected_cmd}\n', f'{expected_args}\n']
     for line in section_lines:
         stripped = line.strip()
         if stripped.startswith('command =') or stripped.startswith('args ='):
@@ -245,16 +240,16 @@ if section_start >= 0:
     print('updated')
 else:
     # Add new section
-    lines.append('\n[mcp_servers.gitnexus]\ncommand = \"gitnexus\"\nargs = [ \"mcp\" ]\n')
+    lines.append(f'\n[mcp_servers.gitnexus]\n{expected_cmd}\n{expected_args}\n')
     print('added')
 
 with open(config_path, 'w') as f:
     f.writelines(lines)
-" "$codex_config")
+" "$codex_config" "$node_path" "$gitnexus_entry")
 
   case "$action" in
-    added)     ok "Codex MCP entry added" ;;
-    updated)   ok "Codex MCP entry updated (now uses local fork)" ;;
+    added)     ok "Codex MCP entry added (absolute paths)" ;;
+    updated)   ok "Codex MCP entry updated (now uses absolute paths)" ;;
     unchanged) ok "Codex MCP already configured" ;;
   esac
 }
@@ -412,14 +407,17 @@ main() {
   echo -e "\n${CYAN}🔧 GitNexus MCP setup${NC}"
 
   check_prereqs
+  fork_web_ui
+  apply_gitnexus_customizations
+  setup_cli_build
+
+  # Configure MCP AFTER build so absolute paths to dist/ are valid
   configure_mcp
   configure_claude_cli
   configure_codex
-  fork_web_ui
+
   install_global_skills
   apply_custom_skills
-  apply_gitnexus_customizations
-  setup_cli_build
 
   echo ""
   echo -e "${GREEN}═══════════════════════════════════════════${NC}"
