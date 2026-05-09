@@ -5,7 +5,7 @@ import {
   buildProviderIndex,
   runWildcardMatch,
 } from '../../../src/core/group/matching.js';
-import type { StoredContract } from '../../../src/core/group/types.js';
+import type { StoredContract, MatchingConfig } from '../../../src/core/group/types.js';
 
 describe('normalizeContractId', () => {
   it('lowercases HTTP method', () => {
@@ -20,6 +20,16 @@ describe('normalizeContractId', () => {
     expect(normalizeContractId('grpc::Hr.UserService/GetUser')).toBe(
       'grpc::hr.userservice/GetUser',
     );
+  });
+
+  it('lowercases thrift package and service while preserving method case', () => {
+    expect(normalizeContractId('thrift::Billing.V1.OrderService/PlaceOrder')).toBe(
+      'thrift::billing.v1.orderservice/PlaceOrder',
+    );
+  });
+
+  it('preserves case for malformed thrift id with leading slash', () => {
+    expect(normalizeContractId('thrift::/PlaceOrder')).toBe('thrift::/PlaceOrder');
   });
 
   it('preserves case for malformed gRPC id with leading slash (no full-string lowercasing)', () => {
@@ -219,6 +229,26 @@ function makeGrpcContract(
   };
 }
 
+function makeThriftContract(
+  id: string,
+  role: 'provider' | 'consumer',
+  repo: string,
+  overrides: Partial<StoredContract> = {},
+): StoredContract {
+  return {
+    contractId: id,
+    type: 'thrift',
+    role,
+    symbolUid: `uid-${repo}-${id}`,
+    symbolRef: { filePath: `src/${repo}.ts`, name: `fn-${id}` },
+    symbolName: `fn-${id}`,
+    confidence: 0.9,
+    meta: {},
+    repo,
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // buildProviderIndex
 // ---------------------------------------------------------------------------
@@ -255,6 +285,18 @@ describe('runExactMatch — gRPC wildcard handling', () => {
     // gRPC wildcards should NOT be matched in exact pass
     expect(matched).toHaveLength(0);
     // Both should appear in unmatched
+    expect(unmatched).toHaveLength(2);
+  });
+
+  it('test_runExactMatch_skips_thrift_wildcard_contracts', () => {
+    const contracts: StoredContract[] = [
+      makeThriftContract('thrift::billing.v1.OrderService/*', 'consumer', 'frontend'),
+      makeThriftContract('thrift::billing.v1.OrderService/*', 'provider', 'backend'),
+    ];
+
+    const { matched, unmatched } = runExactMatch(contracts);
+
+    expect(matched).toHaveLength(0);
     expect(unmatched).toHaveLength(2);
   });
 
@@ -401,5 +443,384 @@ describe('runWildcardMatch', () => {
 
     expect(matched).toHaveLength(1);
     expect(matched[0].contractId).toBe('grpc::com.example.UserService/*');
+  });
+
+  it('matches thrift fully-qualified service wildcard to a thrift provider method', () => {
+    const consumer = makeThriftContract(
+      'thrift::billing.v1.OrderService/*',
+      'consumer',
+      'frontend',
+    );
+    const provider = makeThriftContract(
+      'thrift::billing.v1.OrderService/PlaceOrder',
+      'provider',
+      'backend',
+    );
+
+    const providerIndex = buildProviderIndex([provider]);
+    const { matched, remaining } = runWildcardMatch([consumer], providerIndex);
+
+    expect(matched).toHaveLength(1);
+    expect(matched[0].type).toBe('thrift');
+    expect(matched[0].from.repo).toBe('frontend');
+    expect(matched[0].to.repo).toBe('backend');
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('matches bare thrift service wildcard to a package-qualified thrift provider', () => {
+    const consumer = makeThriftContract('thrift::OrderService/*', 'consumer', 'frontend');
+    const provider = makeThriftContract(
+      'thrift::billing.v1.OrderService/PlaceOrder',
+      'provider',
+      'backend',
+    );
+
+    const providerIndex = buildProviderIndex([provider]);
+    const { matched } = runWildcardMatch([consumer], providerIndex);
+
+    expect(matched).toHaveLength(1);
+    expect(matched[0].contractId).toBe('thrift::OrderService/*');
+  });
+
+  it('does not match bare thrift service wildcard when multiple package-qualified services match', () => {
+    const consumer = makeThriftContract('thrift::OrderService/*', 'consumer', 'frontend');
+    const billingProvider = makeThriftContract(
+      'thrift::billing.v1.OrderService/PlaceOrder',
+      'provider',
+      'billing',
+    );
+    const salesProvider = makeThriftContract(
+      'thrift::sales.v1.OrderService/PlaceOrder',
+      'provider',
+      'sales',
+    );
+
+    const providerIndex = buildProviderIndex([billingProvider, salesProvider]);
+    const { matched, remaining } = runWildcardMatch([consumer], providerIndex);
+
+    expect(matched).toHaveLength(0);
+    expect(remaining).toEqual([consumer]);
+  });
+
+  it('keeps fully-qualified thrift service wildcard matching when same bare service appears elsewhere', () => {
+    const consumer = makeThriftContract(
+      'thrift::billing.v1.OrderService/*',
+      'consumer',
+      'frontend',
+    );
+    const billingProvider = makeThriftContract(
+      'thrift::billing.v1.OrderService/PlaceOrder',
+      'provider',
+      'billing',
+    );
+    const salesProvider = makeThriftContract(
+      'thrift::sales.v1.OrderService/PlaceOrder',
+      'provider',
+      'sales',
+    );
+
+    const providerIndex = buildProviderIndex([billingProvider, salesProvider]);
+    const { matched, remaining } = runWildcardMatch([consumer], providerIndex);
+
+    expect(matched).toHaveLength(1);
+    expect(matched[0].to.repo).toBe('billing');
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('matches bare thrift service method to a package-qualified thrift provider method', () => {
+    const consumer = makeThriftContract('thrift::OrderService/PlaceOrder', 'consumer', 'frontend');
+    const provider = makeThriftContract(
+      'thrift::billing.v1.OrderService/PlaceOrder',
+      'provider',
+      'backend',
+    );
+
+    const providerIndex = buildProviderIndex([provider]);
+    const { matched, unmatched } = runExactMatch([consumer, provider], providerIndex);
+
+    expect(matched).toHaveLength(1);
+    expect(matched[0].type).toBe('thrift');
+    expect(matched[0].matchType).toBe('exact');
+    expect(matched[0].contractId).toBe('thrift::OrderService/PlaceOrder');
+    expect(matched[0].from.repo).toBe('frontend');
+    expect(matched[0].to.repo).toBe('backend');
+    expect(unmatched).toHaveLength(0);
+  });
+
+  it('does not match bare thrift service method to a different provider method', () => {
+    const consumer = makeThriftContract('thrift::OrderService/PlaceOrder', 'consumer', 'frontend');
+    const provider = makeThriftContract(
+      'thrift::billing.v1.OrderService/GetOrderStatus',
+      'provider',
+      'backend',
+    );
+
+    const providerIndex = buildProviderIndex([provider]);
+    const { matched, unmatched } = runExactMatch([consumer, provider], providerIndex);
+
+    expect(matched).toHaveLength(0);
+    expect(unmatched).toEqual([consumer, provider]);
+  });
+
+  it('does not match bare thrift service method when multiple package-qualified providers match', () => {
+    const consumer = makeThriftContract('thrift::OrderService/PlaceOrder', 'consumer', 'frontend');
+    const billingProvider = makeThriftContract(
+      'thrift::billing.v1.OrderService/PlaceOrder',
+      'provider',
+      'billing',
+    );
+    const salesProvider = makeThriftContract(
+      'thrift::sales.v1.OrderService/PlaceOrder',
+      'provider',
+      'sales',
+    );
+
+    const providerIndex = buildProviderIndex([salesProvider, billingProvider]);
+    const { matched, unmatched } = runExactMatch(
+      [consumer, salesProvider, billingProvider],
+      providerIndex,
+    );
+
+    expect(matched).toHaveLength(0);
+    expect(unmatched).toEqual([consumer, salesProvider, billingProvider]);
+  });
+
+  it('does not match a thrift wildcard to a gRPC provider', () => {
+    const consumer = makeThriftContract('thrift::OrderService/*', 'consumer', 'frontend');
+    const provider = makeGrpcContract(
+      'grpc::billing.v1.OrderService/PlaceOrder',
+      'provider',
+      'backend',
+    );
+
+    const providerIndex = buildProviderIndex([provider]);
+    const { matched, remaining } = runWildcardMatch([consumer], providerIndex);
+
+    expect(matched).toHaveLength(0);
+    expect(remaining).toEqual([consumer]);
+  });
+});
+
+describe('buildNoisyContractFilter (via runExactMatch)', () => {
+  const makeContract = (
+    id: string,
+    role: 'provider' | 'consumer',
+    repo: string,
+  ): StoredContract => ({
+    contractId: id,
+    type: 'http',
+    role,
+    symbolUid: `uid-${repo}-${id}`,
+    symbolRef: { filePath: `src/${repo}.ts`, name: `fn-${id}` },
+    symbolName: `fn-${id}`,
+    confidence: 0.8,
+    meta: {},
+    repo,
+  });
+
+  it('exclude_links_paths prevents cross-links for configured paths', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: ['/ping'],
+      exclude_links_param_only_paths: false,
+    };
+
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/ping', 'provider', 'backend'),
+      makeContract('http::GET::/ping', 'consumer', 'frontend'),
+      makeContract('http::GET::/api/users', 'provider', 'backend'),
+      makeContract('http::GET::/api/users', 'consumer', 'frontend'),
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched, unmatched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(1);
+    expect(matched[0].contractId).toBe('http::GET::/api/users');
+  });
+
+  it('excluded providers do not appear in matched', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: ['/health'],
+      exclude_links_param_only_paths: false,
+    };
+
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/health', 'provider', 'backend'),
+      makeContract('http::GET::/health', 'consumer', 'frontend'),
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(0);
+  });
+
+  it('excluded contracts do not appear in unmatched', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: ['/ping'],
+      exclude_links_param_only_paths: false,
+    };
+
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/ping', 'provider', 'backend'),
+      makeContract('http::GET::/ping', 'consumer', 'frontend'),
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched, unmatched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(0);
+    expect(unmatched).toHaveLength(0);
+  });
+
+  it('exclude_links_param_only_paths filters /{param} and /{param}/{param}', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: [],
+      exclude_links_param_only_paths: true,
+    };
+
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/{param}', 'provider', 'backend'),
+      makeContract('http::GET::/{param}', 'consumer', 'frontend'),
+      makeContract('http::GET::/{param}/{param}', 'provider', 'backend'),
+      makeContract('http::GET::/{param}/{param}', 'consumer', 'frontend'),
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched, unmatched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(0);
+    expect(unmatched).toHaveLength(0);
+  });
+
+  it('mixed routes like /users/{param} are NOT excluded by param_only', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: [],
+      exclude_links_param_only_paths: true,
+    };
+
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/users/{param}', 'provider', 'backend'),
+      makeContract('http::GET::/users/{param}', 'consumer', 'frontend'),
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(1);
+    expect(matched[0].contractId).toBe('http::GET::/users/{param}');
+  });
+
+  it('default config (no exclusions) produces no filtering', () => {
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/ping', 'provider', 'backend'),
+      makeContract('http::GET::/ping', 'consumer', 'frontend'),
+      makeContract('http::GET::/{param}', 'provider', 'backend'),
+      makeContract('http::GET::/{param}', 'consumer', 'frontend'),
+    ];
+
+    const { matched } = runExactMatch(contracts);
+
+    expect(matched).toHaveLength(2);
+  });
+
+  it('trailing slash on contractId still matches configured exclusion', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: ['/ping'],
+      exclude_links_param_only_paths: false,
+    };
+
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/ping/', 'provider', 'backend'),
+      makeContract('http::GET::/ping/', 'consumer', 'frontend'),
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched, unmatched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(0);
+    expect(unmatched).toHaveLength(0);
+  });
+
+  it('root path exclusion ["/"] suppresses http::GET::/ contracts', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: ['/'],
+      exclude_links_param_only_paths: false,
+    };
+
+    const contracts: StoredContract[] = [
+      makeContract('http::GET::/', 'provider', 'backend'),
+      makeContract('http::GET::/', 'consumer', 'frontend'),
+      makeContract('http::GET::/api/users', 'provider', 'backend'),
+      makeContract('http::GET::/api/users', 'consumer', 'frontend'),
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched, unmatched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(1);
+    expect(matched[0].contractId).toBe('http::GET::/api/users');
+    expect(unmatched).toHaveLength(0);
+  });
+
+  it('non-HTTP contracts are never filtered', () => {
+    const matchingConfig: MatchingConfig = {
+      bm25_threshold: 0.7,
+      embedding_threshold: 0.65,
+      max_candidates_per_step: 3,
+      exclude_links_paths: ['/ping'],
+      exclude_links_param_only_paths: true,
+    };
+
+    const contracts: StoredContract[] = [
+      {
+        contractId: 'topic::events.ping',
+        type: 'topic',
+        role: 'provider',
+        symbolUid: 'uid-backend-topic',
+        symbolRef: { filePath: 'src/backend.ts', name: 'fn-topic' },
+        symbolName: 'fn-topic',
+        confidence: 0.8,
+        meta: {},
+        repo: 'backend',
+      },
+      {
+        contractId: 'topic::events.ping',
+        type: 'topic',
+        role: 'consumer',
+        symbolUid: 'uid-frontend-topic',
+        symbolRef: { filePath: 'src/frontend.ts', name: 'fn-topic' },
+        symbolName: 'fn-topic',
+        confidence: 0.8,
+        meta: {},
+        repo: 'frontend',
+      },
+    ];
+
+    const providerIndex = buildProviderIndex(contracts, matchingConfig);
+    const { matched } = runExactMatch(contracts, providerIndex, matchingConfig);
+
+    expect(matched).toHaveLength(1);
   });
 });

@@ -14,14 +14,21 @@ if (!process.env.ORT_LOG_LEVEL) {
   process.env.ORT_LOG_LEVEL = '3';
 }
 
-import { pipeline, env, type FeatureExtractionPipeline } from '@huggingface/transformers';
-import os from 'os';
+import {
+  pipeline,
+  env,
+  type FeatureExtractionPipeline,
+  type ProgressInfo,
+} from '@huggingface/transformers';
 import { existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, dirname } from 'path';
 import { createRequire } from 'module';
 import { DEFAULT_EMBEDDING_CONFIG, type EmbeddingConfig, type ModelProgress } from './types.js';
 import { isHttpMode, getHttpDimensions, httpEmbed } from './http-client.js';
+import { resolveEmbeddingConfig } from './config.js';
+import { applyHfEnvOverrides, isHfDownloadFailure, withHfDownloadRetry } from './hf-env.js';
+import { logger } from '../logger.js';
 
 /**
  * Check whether the onnxruntime-node package that @huggingface/transformers
@@ -144,13 +151,12 @@ export const initEmbedder = async (
 
   isInitializing = true;
 
-  const finalConfig = { ...DEFAULT_EMBEDDING_CONFIG, ...config };
-  // On Windows, use DirectML for GPU acceleration (via DirectX12)
-  // CUDA is only available on Linux x64 with onnxruntime-node
+  const finalConfig = resolveEmbeddingConfig(config);
+  // CUDA is probe-gated because ONNX Runtime can crash in native code when
+  // provider libraries are missing. DirectML stays opt-in for the same reason.
   // Probe for CUDA first — ONNX Runtime crashes (uncatchable native error)
   // if we attempt CUDA without the required shared libraries
-  const isWindows = process.platform === 'win32';
-  const gpuDevice = isWindows ? 'dml' : isCudaAvailable() ? 'cuda' : 'cpu';
+  const gpuDevice = isCudaAvailable() ? 'cuda' : 'cpu';
   const requestedDevice =
     forceDevice || (finalConfig.device === 'auto' ? gpuDevice : finalConfig.device);
 
@@ -158,25 +164,30 @@ export const initEmbedder = async (
     try {
       // Configure transformers.js environment
       env.allowLocalModels = false;
-      // Default cache to user-writable location. transformers.js defaults to
-      // ./node_modules/.cache inside its own install dir, which is unwritable
-      // when gitnexus is installed globally (e.g. /usr/lib/node_modules/).
-      // Respect HF_HOME if set, otherwise fall back to ~/.cache/huggingface.
-      env.cacheDir = process.env.HF_HOME ?? join(os.homedir(), '.cache', 'huggingface');
+      // Bridge user-controlled env vars to transformers.js: HF_HOME →
+      // env.cacheDir, HF_ENDPOINT → env.remoteHost (#1205). Centralised in
+      // applyHfEnvOverrides so the MCP embedder entry point behaves
+      // identically.
+      applyHfEnvOverrides(env);
 
       const isDev = process.env.NODE_ENV === 'development';
       if (isDev) {
-        console.log(`🧠 Loading embedding model: ${finalConfig.modelId}`);
+        logger.info(`🧠 Loading embedding model: ${finalConfig.modelId}`);
       }
 
       const progressCallback = onProgress
-        ? (data: any) => {
+        ? (data: ProgressInfo) => {
             const progress: ModelProgress = {
-              status: data.status || 'progress',
-              file: data.file,
-              progress: data.progress,
-              loaded: data.loaded,
-              total: data.total,
+              // Map the `progress_total` aggregate event (not in ModelProgress.status)
+              // back to 'progress' so callers don't need to handle it separately.
+              status:
+                data.status === 'progress_total'
+                  ? 'progress'
+                  : ((data.status as ModelProgress['status']) ?? 'progress'),
+              file: 'file' in data ? data.file : undefined,
+              progress: 'progress' in data ? data.progress : undefined,
+              loaded: 'loaded' in data ? data.loaded : undefined,
+              total: 'total' in data ? data.total : undefined,
             };
             onProgress(progress);
           }
@@ -192,21 +203,38 @@ export const initEmbedder = async (
       for (const device of devicesToTry) {
         try {
           if (isDev && device === 'dml') {
-            console.log('🔧 Trying DirectML (DirectX12) GPU backend...');
+            logger.info('🔧 Trying DirectML (DirectX12) GPU backend...');
           } else if (isDev && device === 'cuda') {
-            console.log('🔧 Trying CUDA GPU backend...');
+            logger.info('🔧 Trying CUDA GPU backend...');
           } else if (isDev && device === 'cpu') {
-            console.log('🔧 Using CPU backend...');
+            logger.info('🔧 Using CPU backend...');
           } else if (isDev && device === 'wasm') {
-            console.log('🔧 Using WASM backend (slower)...');
+            logger.info('🔧 Using WASM backend (slower)...');
           }
 
-          embedderInstance = await (pipeline as any)('feature-extraction', finalConfig.modelId, {
-            device: device,
-            dtype: 'fp32',
-            progress_callback: progressCallback,
-            session_options: { logSeverityLevel: 3 },
-          });
+          embedderInstance = await withHfDownloadRetry(
+            () =>
+              pipeline('feature-extraction', finalConfig.modelId, {
+                device: device,
+                dtype: 'fp32',
+                progress_callback: progressCallback,
+                session_options: {
+                  logSeverityLevel: 3,
+                  intraOpNumThreads: finalConfig.threads,
+                  interOpNumThreads: 1,
+                  executionMode: 'sequential',
+                },
+              }),
+            {
+              onRetry: isDev
+                ? (attempt, max, err) =>
+                    logger.warn(
+                      { attempt, max, err: err.message },
+                      `⚠️  Model download network error (attempt ${attempt}/${max}), retrying…`,
+                    )
+                : undefined,
+            },
+          );
           currentDevice = device;
 
           if (isDev) {
@@ -216,15 +244,29 @@ export const initEmbedder = async (
                 : device === 'cuda'
                   ? 'GPU (CUDA)'
                   : device.toUpperCase();
-            console.log(`✅ Using ${label} backend`);
-            console.log('✅ Embedding model loaded successfully');
+            logger.info(`✅ Using ${label} backend`);
+            logger.info('✅ Embedding model loaded successfully');
           }
 
           return embedderInstance!;
         } catch (deviceError) {
+          // Network errors and circuit-open errors are not device-specific —
+          // they will fail the same way on every device. Rethrow immediately
+          // with actionable HF_ENDPOINT guidance rather than silently falling
+          // back to the next device.
+          const errMsg = deviceError instanceof Error ? deviceError.message : String(deviceError);
+          if (isHfDownloadFailure(errMsg)) {
+            const endpointHint = process.env.HF_ENDPOINT
+              ? `The configured endpoint (${process.env.HF_ENDPOINT}) may be unreachable.`
+              : `huggingface.co may be unreachable from your network.\n` +
+                `  Set HF_ENDPOINT to a mirror and retry:\n` +
+                `    HF_ENDPOINT=https://hf-mirror.com npx gitnexus analyze --embeddings\n` +
+                `    (Windows: set HF_ENDPOINT=https://hf-mirror.com && npx gitnexus analyze --embeddings)`;
+            throw new Error(`Failed to download embedding model: ${errMsg}\n  ${endpointHint}`);
+          }
           if (isDev && (device === 'cuda' || device === 'dml')) {
             const gpuType = device === 'dml' ? 'DirectML' : 'CUDA';
-            console.log(`⚠️  ${gpuType} not available, falling back to CPU...`);
+            logger.info(`⚠️  ${gpuType} not available, falling back to CPU...`);
           }
           // Continue to next device in list
           if (device === devicesToTry[devicesToTry.length - 1]) {

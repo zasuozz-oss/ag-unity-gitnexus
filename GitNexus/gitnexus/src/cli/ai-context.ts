@@ -9,6 +9,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { type GeneratedSkillInfo } from './skill-gen.js';
+import { logger } from '../core/logger.js';
 
 interface RepoStats {
   files?: number;
@@ -22,6 +23,8 @@ interface RepoStats {
 export interface AIContextOptions {
   skipAgentsMd?: boolean;
   noStats?: boolean;
+  /** Project type hint (e.g. 'unity') — changes re-index command in generated content. */
+  projectType?: string;
 }
 
 const GITNEXUS_START_MARKER = '<!-- gitnexus:start -->';
@@ -88,7 +91,9 @@ function generateGitNexusContent(
   generatedSkills?: GeneratedSkillInfo[],
   groupNames?: string[],
   noStats?: boolean,
+  projectType?: string,
 ): string {
+  const analyzeCmd = projectType === 'unity' ? 'gitnexus unity analyze' : 'gitnexus analyze';
   void generatedSkills;
 
   const skillsTable = `| Task | Use this global skill |
@@ -223,6 +228,7 @@ export async function generateAIContextFiles(
     generatedSkills,
     groupNames,
     options?.noStats,
+    options?.projectType,
   );
   const createdFiles: string[] = [];
 

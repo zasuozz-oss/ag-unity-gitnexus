@@ -34,6 +34,7 @@ import {
 import type { LanguageProvider } from './language-provider.js';
 import type { ParsedFile } from 'gitnexus-shared';
 import { WorkerPool } from './workers/worker-pool.js';
+import { logger } from '../logger.js';
 import type {
   ParseWorkerResult,
   ParseWorkerInput,
@@ -191,7 +192,7 @@ const processParsingWithWorkers = async (
     const summary = Array.from(skippedLanguages.entries())
       .map(([lang, count]) => `${lang}: ${count}`)
       .join(', ');
-    console.warn(`  Skipped unsupported languages: ${summary}`);
+    logger.warn(`  Skipped unsupported languages: ${summary}`);
   }
 
   // Final progress
@@ -382,7 +383,7 @@ const processParsingSequential = async (
         bufferSize: getTreeSitterBufferSize(parseContent),
       });
     } catch (parseError) {
-      console.warn(`Skipping unparseable file: ${file.path}`);
+      logger.warn(`Skipping unparseable file: ${file.path}`);
       continue;
     }
 
@@ -408,7 +409,7 @@ const processParsingSequential = async (
       query = new Parser.Query(language, queryString);
       matches = query.matches(tree.rootNode);
     } catch (queryError) {
-      console.warn(`Query error for ${file.path}:`, queryError);
+      logger.warn({ queryError }, `Query error for ${file.path}:`);
       continue;
     }
 
@@ -542,10 +543,13 @@ const processParsingSequential = async (
         }
       }
 
-      // Append #<paramCount> to Method/Constructor IDs to disambiguate overloads.
-      // Functions are not suffixed — they don't overload by name in the same scope.
+      // Append #<paramCount> to owned callable IDs to disambiguate overloads.
+      // Top-level Function IDs stay stable; functions inside an owner may overload.
       // When same-arity collisions exist, append ~type1,type2 for further disambiguation.
-      const needsAritySuffix = nodeLabel === 'Method' || nodeLabel === 'Constructor';
+      const needsAritySuffix =
+        nodeLabel === 'Method' ||
+        nodeLabel === 'Constructor' ||
+        (nodeLabel === 'Function' && enclosingClassId !== null);
       let arityTag = needsAritySuffix && arityForId !== undefined ? `#${arityForId}` : '';
       if (arityTag && seqDefMethods && seqDefMethodInfo && seqClassNodeId !== undefined) {
         // Use cached method map + collision groups (built once per class, not per method)
@@ -698,7 +702,7 @@ const processParsingSequential = async (
 
   if (skippedByLang && skippedByLang.size > 0) {
     for (const [lang, count] of skippedByLang.entries()) {
-      console.warn(
+      logger.warn(
         `[ingestion] Skipped ${count} ${lang} file(s) in parsing processing — ${lang} parser not available.`,
       );
     }
@@ -739,7 +743,7 @@ export const processParsing = async (
       // in scope-resolution with an empty cache and get re-parsed.
       // Surfacing this in PROF mode prevents silent perf cliffs when
       // a repo crosses the worker-pool threshold.
-      console.warn(
+      logger.warn(
         `[scope-resolution prof] worker pool engaged for ${files.length} files — cross-phase tree cache will be empty; scope-resolution re-parses.`,
       );
     }
@@ -754,7 +758,7 @@ export const processParsing = async (
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.warn('Worker pool parsing stopped; continuing with sequential parser:', message);
+      logger.warn({ message }, 'Worker pool parsing stopped; continuing with sequential parser:');
       reportProgress?.(
         lastProgress,
         files.length,

@@ -1,4 +1,4 @@
-export type ContractType = 'http' | 'grpc' | 'topic' | 'lib' | 'custom';
+export type ContractType = 'http' | 'grpc' | 'thrift' | 'topic' | 'lib' | 'custom';
 export type MatchType = 'exact' | 'manifest' | 'wildcard' | 'bm25' | 'embedding';
 export type ContractRole = 'provider' | 'consumer';
 
@@ -24,15 +24,35 @@ export interface GroupManifestLink {
 export interface DetectConfig {
   http: boolean;
   grpc: boolean;
+  thrift: boolean;
   topics: boolean;
   shared_libs: boolean;
   embedding_fallback: boolean;
+  workspace_deps: boolean;
 }
 
 export interface MatchingConfig {
   bm25_threshold: number;
   embedding_threshold: number;
   max_candidates_per_step: number;
+  /**
+   * HTTP paths to exclude from cross-link matching. Contracts at these paths
+   * are still extracted and visible in the registry, but they don't produce
+   * cross-repo links. Useful for health-check endpoints (`/ping`, `/health`)
+   * that every service exposes and would otherwise create N×M false links.
+   * Trailing slashes are normalized before comparison.
+   * @default []
+   */
+  exclude_links_paths?: string[];
+  /**
+   * When `true`, exclude HTTP routes where every path segment is `{param}`
+   * (e.g. `/{param}`, `/{param}/{param}`) from cross-link matching. Mixed
+   * routes like `/users/{param}` are not affected. These param-only routes
+   * collapse to a single catch-all after normalization and produce false
+   * positives across unrelated services.
+   * @default false
+   */
+  exclude_links_param_only_paths?: boolean;
 }
 
 export interface SymbolRef {

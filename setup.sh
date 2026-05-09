@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════
 # GitNexus MCP — auto setup for Antigravity, Claude CLI, and Codex CLI
+# Cross-platform: macOS, Linux, and Windows (Git Bash / MSYS2 / WSL).
 #
 # Install:  ./setup.sh
 # Update:   ./update.sh
@@ -16,6 +17,46 @@ ok()    { echo -e "${GREEN}  ✓${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 step()  { echo -e "\n${CYAN}── $* ──${NC}"; }
+
+# ── OS detection ─────────────────────────────────────────────
+detect_os() {
+  case "$(uname -s)" in
+    Darwin)       OS="macos"   ;;
+    Linux)        OS="linux"   ;;
+    MINGW*|MSYS*|CYGWIN*) OS="windows" ;;
+    *)            OS="unknown" ;;
+  esac
+}
+detect_os
+
+# ── Python wrapper (python3 on macOS/Linux, python on Windows) ──
+PYTHON=""
+detect_python() {
+  if command -v python3 &>/dev/null; then
+    PYTHON="python3"
+  elif command -v python &>/dev/null; then
+    local py_ver
+    py_ver=$(python -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo "2")
+    if [ "$py_ver" = "3" ]; then
+      PYTHON="python"
+    fi
+  fi
+  if [ -z "$PYTHON" ]; then
+    err "Python 3 not found (tried python3 and python)"
+    exit 1
+  fi
+}
+
+# ── rsync wrapper (falls back to cp -r on Windows) ───────────
+sync_skill_dir() {
+  local src="$1"
+  local dst="$2"
+  if command -v rsync &>/dev/null; then
+    rsync -a "$src" "$dst"
+  else
+    cp -r "$src"* "$dst/" 2>/dev/null || cp -r "$src". "$dst/" 2>/dev/null || true
+  fi
+}
 
 # ── Config ───────────────────────────────────────────────────
 ANTIGRAVITY_MCP="$HOME/.gemini/antigravity/mcp_config.json"
@@ -35,6 +76,8 @@ UPSTREAM_REPO="https://github.com/abhigyanpatwari/GitNexus.git"
 # ── Prereqs ──────────────────────────────────────────────────
 check_prereqs() {
   step "Checking prerequisites"
+
+  detect_python
 
   if ! command -v node &>/dev/null; then
     err "Node.js not found. Install Node >= 20 first."; exit 1
@@ -56,23 +99,27 @@ check_prereqs() {
   fi
   ok "git available"
 
-  if ! command -v rsync &>/dev/null; then
-    err "rsync not found"; exit 1
+  # rsync is optional on Windows — we have fallbacks
+  if command -v rsync &>/dev/null; then
+    ok "rsync available"
+  else
+    if [ "$OS" = "windows" ]; then
+      warn "rsync not found — using fallback copy (works but slower)"
+    else
+      err "rsync not found (install via: brew install rsync / apt install rsync)"
+      exit 1
+    fi
   fi
-  ok "rsync available"
 
-  if ! command -v python3 &>/dev/null; then
-    err "python3 not found"; exit 1
-  fi
-  ok "python3 available"
+  ok "$PYTHON available"
 }
 
 # ── Configure Antigravity MCP ────────────────────────────────
 configure_mcp() {
   step "Configuring Antigravity MCP"
 
-  if ! command -v python3 &>/dev/null; then
-    warn "python3 not found — add manually to $ANTIGRAVITY_MCP:"
+  if [ -z "$PYTHON" ]; then
+    warn "Python 3 not found — add manually to $ANTIGRAVITY_MCP:"
     cat << 'EOF'
   "gitnexus": {
     "command": "gitnexus",
@@ -86,7 +133,7 @@ EOF
   [ -s "$ANTIGRAVITY_MCP" ] || echo '{"mcpServers":{}}' > "$ANTIGRAVITY_MCP"
 
   local action
-  action=$(python3 -c "
+  action=$($PYTHON -c "
 import json, sys
 
 path = sys.argv[1]
@@ -126,132 +173,26 @@ print(action)
 
 
 
-# ── Configure Claude CLI MCP ─────────────────────────────────
-configure_claude_cli() {
-  step "Configuring Claude CLI MCP"
+# ── Configure editors via upstream gitnexus setup ─────────────
+# Upstream `gitnexus setup` natively configures:
+#   - Cursor, Claude Code, OpenCode, Codex (MCP)
+#   - Skills installation for all editors
+#   - Claude Code hooks (PreToolUse, PostToolUse)
+# We only keep Antigravity MCP config as custom (not supported upstream).
+configure_editors() {
+  step "Configuring editor MCP via gitnexus setup"
 
-  if ! command -v claude &>/dev/null; then
-    warn "Claude CLI not installed — skipping"
+  if ! command -v gitnexus &>/dev/null; then
+    warn "gitnexus CLI not available yet — skipping editor config"
+    info "Run ./setup.sh again after build to configure editors"
     return
   fi
 
-  # Resolve absolute paths for reliable MCP spawning
-  local node_path gitnexus_entry
-  node_path="$(command -v node)"
-  gitnexus_entry="$GITNEXUS_CLI_DIR/dist/cli/index.js"
-
-  if [ ! -f "$gitnexus_entry" ]; then
-    warn "GitNexus CLI not built yet — will configure after build step"
-    return
-  fi
-
-  # Check if gitnexus MCP is already registered in Claude CLI
-  if claude mcp get gitnexus &>/dev/null; then
-    ok "Claude CLI MCP already configured"
-    return
-  fi
-
-  # Register using "claude mcp add" — the only way Claude CLI recognizes MCP servers
-  # Scope: user (global, not project-specific)
-  local mcp_json
-  mcp_json=$(printf '{"command":"%s","args":["%s","mcp"]}' "$node_path" "$gitnexus_entry")
-
-  if claude mcp add-json -s user gitnexus "$mcp_json" &>/dev/null; then
-    ok "Claude CLI MCP entry added (scope: user)"
+  if gitnexus setup; then
+    ok "Editor MCP configured via gitnexus setup"
   else
-    warn "Failed to add gitnexus MCP to Claude CLI"
-    info "  Manual fix: claude mcp add -s user gitnexus -- $node_path $gitnexus_entry mcp"
+    warn "gitnexus setup failed — editors may need manual MCP config"
   fi
-}
-
-# ── Configure Codex MCP ──────────────────────────────────────
-configure_codex() {
-  step "Configuring Codex MCP"
-
-  local codex_dir="$HOME/.codex"
-  local codex_config="$codex_dir/config.toml"
-
-  if [ ! -d "$codex_dir" ]; then
-    warn "Codex not installed — skipping"
-    return
-  fi
-
-  if ! command -v python3 &>/dev/null; then
-    warn "python3 not found — add gitnexus MCP manually to $codex_config"
-    return
-  fi
-
-  # Resolve absolute paths for reliable MCP spawning
-  local node_path gitnexus_entry
-  node_path="$(command -v node)"
-  gitnexus_entry="$GITNEXUS_CLI_DIR/dist/cli/index.js"
-
-  # Ensure config.toml exists
-  [ -f "$codex_config" ] || touch "$codex_config"
-
-  local action
-  action=$(python3 -c "
-import sys
-
-config_path = sys.argv[1]
-node_path = sys.argv[2]
-gitnexus_entry = sys.argv[3]
-
-with open(config_path) as f:
-    lines = f.readlines()
-
-# Parse: find [mcp_servers.gitnexus] section boundaries
-section_start = -1
-section_end = len(lines)
-for i, line in enumerate(lines):
-    stripped = line.strip()
-    # Match section header: starts with [ but NOT array values like [\"foo\"]
-    if stripped.startswith('[') and not stripped.startswith('[\"') and not stripped.startswith(\"['\"):
-        if stripped == '[mcp_servers.gitnexus]':
-            section_start = i
-        elif section_start >= 0:
-            # Found next section after our target
-            section_end = i
-            break
-
-expected_cmd = f'command = \"{node_path}\"'
-expected_args = f'args = [ \"{gitnexus_entry}\", \"mcp\" ]'
-
-if section_start >= 0:
-    # Check if already correct (absolute paths)
-    section_lines = lines[section_start+1:section_end]
-    has_correct_cmd = any(expected_cmd in l for l in section_lines)
-    has_correct_args = any(expected_args in l for l in section_lines)
-    if has_correct_cmd and has_correct_args:
-        print('unchanged')
-        sys.exit(0)
-
-    # Replace command/args, keep other keys (env, tools, etc.)
-    new_section = [f'{expected_cmd}\n', f'{expected_args}\n']
-    for line in section_lines:
-        stripped = line.strip()
-        if stripped.startswith('command =') or stripped.startswith('args ='):
-            continue
-        # Skip orphan array lines from previous bad runs
-        if stripped.startswith('[\"') or stripped.startswith(\"['\"):
-            continue
-        new_section.append(line)
-    lines[section_start+1:section_end] = new_section
-    print('updated')
-else:
-    # Add new section
-    lines.append(f'\n[mcp_servers.gitnexus]\n{expected_cmd}\n{expected_args}\n')
-    print('added')
-
-with open(config_path, 'w') as f:
-    f.writelines(lines)
-" "$codex_config" "$node_path" "$gitnexus_entry")
-
-  case "$action" in
-    added)     ok "Codex MCP entry added (absolute paths)" ;;
-    updated)   ok "Codex MCP entry updated (now uses absolute paths)" ;;
-    unchanged) ok "Codex MCP already configured" ;;
-  esac
 }
 
 # ── Install Global Skills ───────────────────────────────────
@@ -278,7 +219,14 @@ install_skills_to() {
     local skill_name
     skill_name="$(basename "$skill_dir")"
     mkdir -p "$target_dir/$skill_name"
-    rsync -a "$skill_dir/" "$target_dir/$skill_name/"
+    # Use rsync if available, otherwise cp -r
+    if command -v rsync &>/dev/null; then
+      rsync -a "$skill_dir/" "$target_dir/$skill_name/"
+    else
+      cp -r "$skill_dir"* "$target_dir/$skill_name/" 2>/dev/null || true
+      # Ensure hidden files are also copied
+      cp -r "$skill_dir".* "$target_dir/$skill_name/" 2>/dev/null || true
+    fi
     installed=$((installed + 1))
   done
   shopt -u nullglob
@@ -370,13 +318,21 @@ fork_web_ui() {
 apply_gitnexus_customizations() {
   step "Applying local GitNexus customizations"
 
-  if [ ! -x "$SCRIPT_DIR/update.sh" ]; then
-    warn "update.sh not found or not executable — skipping local customizations"
-    return
+  # On Windows (Git Bash), scripts may not be marked executable
+  if [ "$OS" = "windows" ]; then
+    if [ ! -f "$SCRIPT_DIR/update.sh" ]; then
+      warn "update.sh not found — skipping local customizations"
+      return
+    fi
+  else
+    if [ ! -x "$SCRIPT_DIR/update.sh" ]; then
+      warn "update.sh not found or not executable — skipping local customizations"
+      return
+    fi
   fi
 
   info "Delegating upstream-safe patches to update.sh --apply-custom-only"
-  "$SCRIPT_DIR/update.sh" --apply-custom-only
+  bash "$SCRIPT_DIR/update.sh" --apply-custom-only
   ok "Local GitNexus customizations applied"
 }
 
@@ -404,7 +360,6 @@ setup_cli_build() {
   fi
 }
 
-# ── Main ─────────────────────────────────────────────────────
 main() {
   echo -e "\n${CYAN}🔧 GitNexus MCP setup${NC}"
 
@@ -413,12 +368,11 @@ main() {
   apply_gitnexus_customizations
   setup_cli_build
 
-  # Configure MCP AFTER build so absolute paths to dist/ are valid
-  configure_mcp
-  configure_claude_cli
-  configure_codex
+  # Configure MCP AFTER build so gitnexus binary is available
+  configure_mcp          # Antigravity (custom, not supported upstream)
+  configure_editors      # Claude Code, Codex, Cursor, OpenCode (via gitnexus setup)
 
-  install_global_skills
+  # Custom skills overlay (on top of what gitnexus setup installed)
   apply_custom_skills
 
   echo ""
@@ -432,7 +386,7 @@ main() {
   echo -e "  ${DIM}Update${NC}         ./update.sh"
   echo -e "  ${DIM}Re-run setup${NC}   ./setup.sh"
   echo ""
-  echo -e "  ${YELLOW}→ Restart Antigravity, Claude CLI, and Codex CLI to load MCP${NC}"
+  echo -e "  ${YELLOW}→ Restart Antigravity, Claude Code, and Codex to load MCP${NC}"
   echo ""
 }
 

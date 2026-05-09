@@ -17,7 +17,8 @@
 
 import fs from 'fs/promises';
 import lbug from '@ladybugdb/core';
-import { loadFTSExtension, loadVectorExtension } from './lbug-adapter.js';
+import { loadFTSExtension } from './lbug-adapter.js';
+import { createLbugDatabase, isWalCorruptionError } from './lbug-config.js';
 
 /** Per-repo pool: one Database, many Connections */
 interface PoolEntry {
@@ -69,7 +70,6 @@ interface SharedDB {
   db: lbug.Database;
   refCount: number;
   ftsLoaded: boolean;
-  vectorLoaded: boolean;
   /** When true, closeOne skips db.close() — the Database is owned externally. */
   external?: boolean;
 }
@@ -84,9 +84,21 @@ const MAX_CONNS_PER_REPO = 8;
 
 let idleTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Saved real stdout/stderr write — used to silence native module output without race conditions */
-export const realStdoutWrite = process.stdout.write.bind(process.stdout);
-export const realStderrWrite = process.stderr.write.bind(process.stderr);
+// Stdout-capture state lives in `gitnexus/src/mcp/stdio-capture.ts` — a leaf
+// module with zero non-`node:` imports. We re-export the same symbols here
+// so the existing test mock seam (`gitnexus/src/mcp/core/lbug-adapter.ts`
+// re-exports * from this file, and 8+ test files use that path with
+// `vi.mock(...)`) continues to work without churn. The source of truth is
+// the leaf module; this re-export is a compatibility shim.
+//
+// Why the leaf module exists: Codex's adversarial review on PR #1383 found
+// that putting this state in pool-adapter.ts pulled `@ladybugdb/core` into
+// `cli/mcp.ts`'s static-import closure (via stdio-context → pool-adapter →
+// @ladybugdb/core), corrupting stdout in the pre-sentinel window. Routing
+// through the leaf breaks that chain.
+export { realStdoutWrite, realStderrWrite, setActiveStdoutWrite } from '../../mcp/stdio-capture.js';
+import { getActiveStdoutWrite, realStderrWrite } from '../../mcp/stdio-capture.js';
+
 let stdoutSilenceCount = 0;
 /** True while pre-warming connections — prevents watchdog from prematurely restoring stdout */
 let preWarmActive = false;
@@ -175,7 +187,6 @@ function closeOne(repoId: string): void {
         // for the same dbPath reuse it instead of hitting a file lock.
         shared.refCount = 0;
         shared.ftsLoaded = false;
-        shared.vectorLoaded = false;
       } else {
         shared.db.close().catch(() => {});
         dbCache.delete(entry.dbPath);
@@ -210,6 +221,7 @@ let activeQueryCount = 0;
  */
 export function silenceStdout(): void {
   if (stdoutSilenceCount++ === 0) {
+    // eslint-disable-next-line no-restricted-syntax -- silencing infrastructure; replacement is a no-op
     process.stdout.write = (() => true) as any;
   }
 }
@@ -217,7 +229,8 @@ export function silenceStdout(): void {
 export function restoreStdout(): void {
   if (--stdoutSilenceCount <= 0) {
     stdoutSilenceCount = 0;
-    process.stdout.write = realStdoutWrite;
+    // eslint-disable-next-line no-restricted-syntax -- restoring the active stdout-write handler is the silencing API contract
+    process.stdout.write = getActiveStdoutWrite();
   }
 }
 
@@ -228,7 +241,8 @@ export function restoreStdout(): void {
 setInterval(() => {
   if (stdoutSilenceCount > 0 && !preWarmActive && activeQueryCount === 0) {
     stdoutSilenceCount = 0;
-    process.stdout.write = realStdoutWrite;
+    // eslint-disable-next-line no-restricted-syntax -- watchdog recovery for stuck silencing
+    process.stdout.write = getActiveStdoutWrite();
   }
 }, 1000).unref();
 
@@ -248,6 +262,46 @@ const WAITER_TIMEOUT_MS = 15_000;
 
 const LOCK_RETRY_ATTEMPTS = 3;
 const LOCK_RETRY_DELAY_MS = 2000;
+
+async function openReadOnlyDatabase(dbPath: string): Promise<lbug.Database> {
+  let db: lbug.Database | undefined;
+  silenceStdout();
+  try {
+    db = createLbugDatabase(lbug, dbPath, {
+      readOnly: true,
+      throwOnWalReplayFailure: false,
+    });
+    await db.init();
+    return db;
+  } catch (err) {
+    if (db) await db.close().catch(() => {});
+    throw err;
+  } finally {
+    restoreStdout();
+  }
+}
+
+/**
+ * Quarantine the .wal file and retry opening the database.
+ * Used when the initial open fails with a WAL corruption error.
+ */
+async function tryQuarantineAndReopen(dbPath: string, repoId: string): Promise<lbug.Database> {
+  const walPath = dbPath + '.wal';
+  const quarantineName = `${walPath}.corrupt.${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await fs.rename(walPath, quarantineName);
+  } catch {
+    throw new Error(
+      `LadybugDB WAL corruption detected for ${repoId}. ` +
+        `Run \`gitnexus analyze\` to rebuild the index. (quarantine failed)`,
+    );
+  }
+  realStderrWrite(
+    `GitNexus: LadybugDB WAL quarantined for ${repoId}; graph may be stale. ` +
+      `Run \`gitnexus analyze\` to rebuild the index.\n`,
+  );
+  return await openReadOnlyDatabase(dbPath);
+}
 
 /** Deduplicates concurrent initLbug calls for the same repoId */
 const initPromises = new Map<string, Promise<void>>();
@@ -305,21 +359,29 @@ async function doInitLbug(repoId: string, dbPath: string): Promise<void> {
     // avoids lock conflicts when `gitnexus analyze` is writing.
     let lastError: Error | null = null;
     for (let attempt = 1; attempt <= LOCK_RETRY_ATTEMPTS; attempt++) {
-      silenceStdout();
       try {
-        const db = new lbug.Database(
-          dbPath,
-          0, // bufferManagerSize (default)
-          false, // enableCompression (default)
-          true, // readOnly
-        );
-        restoreStdout();
-        shared = { db, refCount: 0, ftsLoaded: false, vectorLoaded: false };
+        const db = await openReadOnlyDatabase(dbPath);
+        shared = { db, refCount: 0, ftsLoaded: false };
         dbCache.set(dbPath, shared);
         break;
       } catch (err: any) {
-        restoreStdout();
         lastError = err instanceof Error ? err : new Error(String(err));
+
+        if (isWalCorruptionError(lastError)) {
+          try {
+            const db = await tryQuarantineAndReopen(dbPath, repoId);
+            shared = { db, refCount: 0, ftsLoaded: false };
+            dbCache.set(dbPath, shared);
+            break;
+          } catch (retryErr) {
+            throw new Error(
+              `LadybugDB WAL corruption detected for ${repoId}. ` +
+                `Run \`gitnexus analyze\` to rebuild the index. ` +
+                `(${retryErr instanceof Error ? retryErr.message : String(retryErr)})`,
+            );
+          }
+        }
+
         const isLockError =
           lastError.message.includes('Could not set lock') || lastError.message.includes('lock');
         if (!isLockError || attempt === LOCK_RETRY_ATTEMPTS) break;
@@ -359,10 +421,6 @@ async function doInitLbug(repoId: string, dbPath: string): Promise<void> {
   // features degrade gracefully and the user-facing query path proceeds.
   if (!shared.ftsLoaded) {
     shared.ftsLoaded = await loadFTSExtension(available[0], { policy: 'load-only' });
-  }
-
-  if (!shared.vectorLoaded) {
-    shared.vectorLoaded = await loadVectorExtension(available[0], { policy: 'load-only' });
   }
 
   // Register pool entry only after all connections are pre-warmed and FTS is
@@ -408,7 +466,7 @@ export async function initLbugWithDb(
   // closeOne() respects the external flag and skips db.close().
   let shared = dbCache.get(dbPath);
   if (!shared) {
-    shared = { db: existingDb, refCount: 0, ftsLoaded: false, vectorLoaded: false, external: true };
+    shared = { db: existingDb, refCount: 0, ftsLoaded: false, external: true };
     dbCache.set(dbPath, shared);
   }
   shared.refCount++;
@@ -428,10 +486,6 @@ export async function initLbugWithDb(
   // must not block on a network install during query execution.
   if (!shared.ftsLoaded) {
     shared.ftsLoaded = await loadFTSExtension(available[0], { policy: 'load-only' });
-  }
-
-  if (!shared.vectorLoaded) {
-    shared.vectorLoaded = await loadVectorExtension(available[0], { policy: 'load-only' });
   }
 
   pool.set(repoId, {

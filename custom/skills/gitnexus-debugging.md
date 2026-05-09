@@ -22,7 +22,7 @@ description: "Use whenever investigating any bug, error, crash, test failure, or
 4. gitnexus_cypher({query: "MATCH path..."})                 → Custom traces if needed
 ```
 
-> If "Index is stale" → run `gitnexus analyze` in terminal.
+> If "Index is stale" → run `gitnexus analyze` (or `gitnexus unity analyze` for Unity projects) in terminal.
 
 ## Checklist
 

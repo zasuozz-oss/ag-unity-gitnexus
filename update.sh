@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # GitNexus upstream update for the local embedded repo.
 # Configures MCP for Antigravity, Claude CLI, and Codex CLI.
+# Cross-platform: macOS, Linux, and Windows (Git Bash / MSYS2 / WSL).
 #
 # Usage: ./update.sh
 set -euo pipefail
@@ -13,6 +14,113 @@ ok()    { echo -e "${GREEN}  ✓${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 step()  { echo -e "\n${CYAN}-- $* --${NC}"; }
+
+# ── OS detection ─────────────────────────────────────────────
+detect_os() {
+  case "$(uname -s)" in
+    Darwin)       OS="macos"   ;;
+    Linux)        OS="linux"   ;;
+    MINGW*|MSYS*|CYGWIN*) OS="windows" ;;
+    *)            OS="unknown" ;;
+  esac
+}
+detect_os
+
+# ── Python wrapper (python3 on macOS/Linux, python on Windows) ──
+PYTHON=""
+detect_python() {
+  if command -v python3 &>/dev/null; then
+    PYTHON="python3"
+  elif command -v python &>/dev/null; then
+    # Verify it's Python 3.x
+    local py_ver
+    py_ver=$(python -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo "2")
+    if [ "$py_ver" = "3" ]; then
+      PYTHON="python"
+    fi
+  fi
+  if [ -z "$PYTHON" ]; then
+    err "Python 3 not found (tried python3 and python)"
+    exit 1
+  fi
+}
+
+# ── rsync-like helper (falls back to cp on Windows) ──────────
+sync_dir() {
+  local src="$1"
+  local dst="$2"
+  shift 2
+  # remaining args are --exclude patterns
+
+  if command -v rsync &>/dev/null; then
+    rsync -a --delete "$@" "$src" "$dst"
+  else
+    # Fallback: remove destination then copy, respecting excludes
+    # Collect exclude patterns into an array
+    local excludes=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --exclude=*) excludes+=("${1#--exclude=}") ; shift ;;
+        --exclude)   excludes+=("$2") ; shift 2 ;;
+        *)           shift ;;
+      esac
+    done
+
+    # On Windows without rsync, use Python for robust sync
+    $PYTHON - "$src" "$dst" "${excludes[@]}" <<'PYSYNC'
+import shutil, sys, os
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+excludes = sys.argv[3:]
+
+def should_exclude(rel_path):
+    """Check if a relative path matches any exclude pattern."""
+    rel_str = str(rel_path).replace('\\', '/')
+    for exc in excludes:
+        exc = exc.strip('/')
+        # Exact match or prefix match
+        if rel_str == exc or rel_str.startswith(exc + '/'):
+            return True
+        # Match basename
+        if '/' not in exc and rel_path.name == exc:
+            return True
+    return False
+
+# Collect files to copy
+src_files = set()
+for path in src.rglob('*'):
+    rel = path.relative_to(src)
+    if should_exclude(rel):
+        continue
+    src_files.add(rel)
+
+# Remove files in dst that are not in src (--delete behavior)
+if dst.exists():
+    for path in sorted(dst.rglob('*'), reverse=True):
+        rel = path.relative_to(dst)
+        if should_exclude(rel):
+            continue
+        if rel not in src_files:
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+
+# Copy files from src to dst
+dst.mkdir(parents=True, exist_ok=True)
+for rel in sorted(src_files):
+    s = src / rel
+    d = dst / rel
+    if s.is_dir():
+        d.mkdir(parents=True, exist_ok=True)
+    elif s.is_file():
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(s), str(d))
+PYSYNC
+  fi
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GITNEXUS_DIR="$SCRIPT_DIR/GitNexus"
@@ -40,13 +148,29 @@ trap cleanup EXIT
 check_prereqs() {
   step "Checking prerequisites"
 
-  for cmd in git node npm python3 rsync; do
+  detect_python
+
+  for cmd in git node npm; do
     if ! command -v "$cmd" &>/dev/null; then
       err "$cmd not found"
       exit 1
     fi
     ok "$cmd available"
   done
+
+  ok "$PYTHON available"
+
+  # rsync is optional on Windows — we have a fallback
+  if command -v rsync &>/dev/null; then
+    ok "rsync available"
+  else
+    if [ "$OS" = "windows" ]; then
+      warn "rsync not found — using Python-based sync (slower but works)"
+    else
+      err "rsync not found (install via: brew install rsync / apt install rsync)"
+      exit 1
+    fi
+  fi
 
   local node_major
   node_major=$(node -v | sed 's/v//' | cut -d. -f1)
@@ -72,20 +196,19 @@ ensure_layout() {
 sync_upstream() {
   step "Syncing upstream GitNexus"
 
-  TMP_DIR="$(mktemp -d)"
+  TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'gitnexus-update')"
   info "Cloning $UPSTREAM_REPO"
   git clone --depth 1 "$UPSTREAM_REPO" "$TMP_DIR" >/dev/null 2>&1
 
   info "Updating $GITNEXUS_DIR"
-  rsync -a --delete \
+  sync_dir "$TMP_DIR/" "$GITNEXUS_DIR/" \
     --exclude='.git' \
     --exclude='node_modules' \
     --exclude='gitnexus/node_modules' \
     --exclude='gitnexus/vendor/tree-sitter-dart/build' \
     --exclude='gitnexus/vendor/tree-sitter-proto/build' \
     --exclude='gitnexus-shared/node_modules' \
-    --exclude='gitnexus-web/node_modules' \
-    "$TMP_DIR/" "$GITNEXUS_DIR/"
+    --exclude='gitnexus-web/node_modules'
 
   ok "Upstream files synced"
 }
@@ -106,7 +229,7 @@ apply_unity_command_patch() {
   cp "$custom_unity_cli" "$unity_cli"
   cp "$custom_unity_preset" "$unity_preset"
 
-  python3 - "$GITNEXUS_CLI_DIR" <<'PY'
+  $PYTHON - "$GITNEXUS_CLI_DIR" <<'PY'
 from pathlib import Path
 import sys
 
@@ -245,6 +368,13 @@ if "ignoreFilter?: { ignored:" not in run_analyze:
         "  dropEmbeddings?: boolean;\n  skipGit?: boolean;\n  /** Custom ignore filter, used by project-specific commands such as Unity analysis. */\n  ignoreFilter?: { ignored: (p: any) => boolean; childrenIgnored: (p: any) => boolean };\n",
         "src/core/run-analyze.ts",
     )
+if "projectType?:" not in run_analyze:
+    run_analyze = replace_once(
+        run_analyze,
+        "  /** Skip AGENTS.md and CLAUDE.md gitnexus block updates. */\n  skipAgentsMd?: boolean;\n",
+        "  /** Skip AGENTS.md and CLAUDE.md gitnexus block updates. */\n  skipAgentsMd?: boolean;\n  /** Project type hint for generated AI context (e.g. 'unity'). */\n  projectType?: string;\n",
+        "src/core/run-analyze.ts",
+    )
 if "{ ignoreFilter: options.ignoreFilter }" not in run_analyze:
     old = """  const pipelineResult = await runPipelineFromRepo(repoPath, (p) => {
     const phaseLabel = PHASE_LABELS[p.phase] || p.phase;
@@ -267,6 +397,12 @@ if "{ ignoreFilter: options.ignoreFilter }" not in run_analyze:
     if old not in run_analyze:
         raise SystemExit("Cannot patch run-analyze.ts: runPipelineFromRepo marker not found")
     run_analyze = run_analyze.replace(old, new, 1)
+# Patch generateAIContextFiles call to pass projectType
+if "projectType: options.projectType" not in run_analyze:
+    run_analyze = run_analyze.replace(
+        "        { skipAgentsMd: options.skipAgentsMd, noStats: options.noStats },",
+        "        { skipAgentsMd: options.skipAgentsMd, noStats: options.noStats, projectType: options.projectType },",
+    )
 write("src/core/run-analyze.ts", run_analyze)
 
 analyze = read("src/cli/analyze.ts")
@@ -287,11 +423,25 @@ if "ignoreFilter?: { ignored:" not in analyze:
         "  /** Index the folder even when no .git directory is present. */\n  skipGit?: boolean;\n  /** Custom ignore filter, used by project-specific commands such as Unity analysis. */\n  ignoreFilter?: { ignored: (p: any) => boolean; childrenIgnored: (p: any) => boolean };\n",
         "src/cli/analyze.ts",
     )
+if "projectType?:" not in analyze:
+    analyze = replace_once(
+        analyze,
+        "  ignoreFilter?: { ignored: (p: any) => boolean; childrenIgnored: (p: any) => boolean };\n",
+        "  ignoreFilter?: { ignored: (p: any) => boolean; childrenIgnored: (p: any) => boolean };\n  /** Project type hint for generated AI context (e.g. 'unity'). */\n  projectType?: string;\n",
+        "src/cli/analyze.ts",
+    )
 if "ignoreFilter: options?.ignoreFilter" not in analyze:
     analyze = replace_once(
         analyze,
         "        skipGit: options?.skipGit,\n",
         "        skipGit: options?.skipGit,\n        ignoreFilter: options?.ignoreFilter,\n",
+        "src/cli/analyze.ts",
+    )
+if "projectType: options?.projectType" not in analyze:
+    analyze = replace_once(
+        analyze,
+        "        ignoreFilter: options?.ignoreFilter,\n",
+        "        ignoreFilter: options?.ignoreFilter,\n        projectType: options?.projectType,\n",
         "src/cli/analyze.ts",
     )
 analyze = analyze.replace("        force: options?.force || options?.skills,\n", "        force: options?.force,\n")
@@ -308,6 +458,9 @@ if skill_block_marker in analyze:
         + "    }"
         + analyze[end:]
     )
+# Normalize npx references to local binary in error messages
+analyze = analyze.replace("npx gitnexus@latest analyze", "gitnexus analyze")
+analyze = analyze.replace("npx gitnexus@latest", "gitnexus")
 write("src/cli/analyze.ts", analyze)
 
 ai_context = read("src/cli/ai-context.ts")
@@ -328,12 +481,12 @@ if skills_table_start != -1:
         + "  void generatedSkills;\n\n"
         + "  const skillsTable = `| Task | Use this global skill |\n"
         + "|------|-----------------------|\n"
-        + "| Understand architecture / \"How does X work?\" | `gitnexus-exploring` |\n"
-        + "| Blast radius / \"What breaks if I change X?\" | `gitnexus-impact-analysis` |\n"
-        + "| Trace bugs / \"Why is X failing?\" | `gitnexus-debugging` |\n"
-        + "| Rename / extract / split / refactor | `gitnexus-refactoring` |\n"
-        + "| Tools, resources, schema reference | `gitnexus-guide` |\n"
-        + "| Index, status, clean, wiki CLI commands | `gitnexus-cli` |`;"
+        + "| Understand architecture / \"How does X work?\" | \\`gitnexus-exploring\\` |\n"
+        + "| Blast radius / \"What breaks if I change X?\" | \\`gitnexus-impact-analysis\\` |\n"
+        + "| Trace bugs / \"Why is X failing?\" | \\`gitnexus-debugging\\` |\n"
+        + "| Rename / extract / split / refactor | \\`gitnexus-refactoring\\` |\n"
+        + "| Tools, resources, schema reference | \\`gitnexus-guide\\` |\n"
+        + "| Index, status, clean, wiki CLI commands | \\`gitnexus-cli\\` |`;"
         + ai_context[skills_table_end:]
     )
 install_start = ai_context.find("/**\n * Install GitNexus skills to .claude/skills/gitnexus/")
@@ -350,6 +503,40 @@ project_install_block = """  // Install skills to .claude/skills/gitnexus/
 
 """
 ai_context = ai_context.replace(project_install_block, "")
+
+# --- Add projectType support to AIContextOptions ---
+if "projectType?:" not in ai_context:
+    ai_context = ai_context.replace(
+        "  noStats?: boolean;\n}",
+        "  noStats?: boolean;\n  /** Project type hint (e.g. 'unity') — changes re-index command in generated content. */\n  projectType?: string;\n}",
+    )
+
+# --- Add projectType param to generateGitNexusContent ---
+if "projectType?:" not in ai_context.split("function generateGitNexusContent")[1].split("): string")[0] if "function generateGitNexusContent" in ai_context else "":
+    ai_context = ai_context.replace(
+        "  noStats?: boolean,\n): string {",
+        "  noStats?: boolean,\n  projectType?: string,\n): string {",
+    )
+
+# --- Replace hardcoded 'gitnexus analyze' with projectType-aware command ---
+if "const analyzeCmd =" not in ai_context:
+    ai_context = ai_context.replace(
+        "): string {\n  void generatedSkills;",
+        "): string {\n  const analyzeCmd = projectType === 'unity' ? 'gitnexus unity analyze' : 'gitnexus analyze';\n  void generatedSkills;",
+    )
+    # Replace the hardcoded gitnexus analyze in the stale-index warning
+    ai_context = ai_context.replace(
+        "> If any GitNexus tool warns the index is stale, run \\`gitnexus analyze\\` in terminal first.",
+        "> If any GitNexus tool warns the index is stale, run \\`${analyzeCmd}\\` in terminal first.",
+    )
+
+# --- Pass projectType through generateAIContextFiles ---
+if "options?.projectType" not in ai_context:
+    ai_context = ai_context.replace(
+        "    groupNames,\n    options?.noStats,\n  );",
+        "    groupNames,\n    options?.noStats,\n    options?.projectType,\n  );",
+    )
+
 write("src/cli/ai-context.ts", ai_context)
 PY
 
@@ -360,7 +547,7 @@ apply_cli_command_patch() {
   step "Applying local CLI command customizations"
 
   local patched
-  patched=$(python3 - "$SCRIPT_DIR" "$GITNEXUS_DIR" "$CUSTOM_SKILLS_DIR" <<'PY'
+  patched=$($PYTHON - "$SCRIPT_DIR" "$GITNEXUS_DIR" "$CUSTOM_SKILLS_DIR" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -453,15 +640,15 @@ configure_claude_cli() {
     return
   fi
 
-  if ! command -v python3 &>/dev/null; then
-    warn "python3 not found — add manually to $CLAUDE_CLI_MCP"
+  if [ -z "$PYTHON" ]; then
+    warn "Python 3 not found — add manually to $CLAUDE_CLI_MCP"
     return
   fi
 
   [ -s "$CLAUDE_CLI_MCP" ] || echo '{"mcpServers":{}}' > "$CLAUDE_CLI_MCP"
 
   local action
-  action=$(python3 -c "
+  action=$($PYTHON -c "
 import json, sys
 
 path = sys.argv[1]
@@ -497,7 +684,7 @@ print(action)
   esac
 }
 
-# ── Configure Codex CLI MCP ──────────────────────────────────────────
+# ── Configure Codex CLI MCP ──────────────────────────────────
 configure_codex() {
   step "Configuring Codex CLI MCP"
 
@@ -508,15 +695,15 @@ configure_codex() {
     return
   fi
 
-  if ! command -v python3 &>/dev/null; then
-    warn "python3 not found — add gitnexus MCP manually to $codex_config"
+  if [ -z "$PYTHON" ]; then
+    warn "Python 3 not found — add gitnexus MCP manually to $codex_config"
     return
   fi
 
   [ -f "$codex_config" ] || touch "$codex_config"
 
   local action
-  action=$(python3 -c "
+  action=$($PYTHON -c "
 import sys
 
 config_path = sys.argv[1]
@@ -628,6 +815,7 @@ build_and_link_cli() {
 
 main() {
   if [ "${1:-}" = "--apply-custom-only" ]; then
+    detect_python
     ensure_layout
     apply_unity_command_patch
     apply_cli_command_patch

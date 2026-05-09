@@ -6,15 +6,20 @@
  */
 
 import { pipeline, env, type FeatureExtractionPipeline } from '@huggingface/transformers';
-import os from 'os';
-import { join } from 'path';
 import {
   isHttpMode,
   getHttpDimensions,
   httpEmbedQuery,
 } from '../../core/embeddings/http-client.js';
+import { resolveEmbeddingConfig } from '../../core/embeddings/config.js';
+import {
+  applyHfEnvOverrides,
+  isHfDownloadFailure,
+  withHfDownloadRetry,
+} from '../../core/embeddings/hf-env.js';
 import { silenceStdout, restoreStdout, realStderrWrite } from '../../core/lbug/pool-adapter.js';
 
+import { logger } from '../../core/logger.js';
 // Model config
 const MODEL_ID = 'Snowflake/snowflake-arctic-embed-xs';
 
@@ -44,18 +49,19 @@ export const initEmbedder = async (): Promise<FeatureExtractionPipeline> => {
   initPromise = (async () => {
     try {
       env.allowLocalModels = false;
-      // Default cache to user-writable location. transformers.js defaults to
-      // ./node_modules/.cache inside its own install dir, which is unwritable
-      // when gitnexus is installed globally (e.g. /usr/lib/node_modules/).
-      // Respect HF_HOME if set, otherwise fall back to ~/.cache/huggingface.
-      env.cacheDir = process.env.HF_HOME ?? join(os.homedir(), '.cache', 'huggingface');
+      // Bridge user-controlled env vars to transformers.js: HF_HOME →
+      // env.cacheDir, HF_ENDPOINT → env.remoteHost (#1205). Centralised in
+      // applyHfEnvOverrides so this MCP entry point behaves identically to
+      // the analyze pipeline embedder.
+      applyHfEnvOverrides(env);
+      const embeddingConfig = resolveEmbeddingConfig();
 
-      console.error('GitNexus: Loading embedding model (first search may take a moment)...');
+      logger.info('GitNexus: Loading embedding model (first search may take a moment)...');
 
-      // Try GPU first (DirectML on Windows, CUDA on Linux), fall back to CPU
-      const isWindows = process.platform === 'win32';
-      const gpuDevice = isWindows ? 'dml' : 'cuda';
-      const devicesToTry: Array<'dml' | 'cuda' | 'cpu'> = [gpuDevice, 'cpu'];
+      const devicesToTry: Array<'dml' | 'cuda' | 'cpu'> =
+        embeddingConfig.device === 'dml' || embeddingConfig.device === 'cuda'
+          ? [embeddingConfig.device, 'cpu']
+          : ['cpu'];
 
       for (const device of devicesToTry) {
         try {
@@ -67,17 +73,39 @@ export const initEmbedder = async (): Promise<FeatureExtractionPipeline> => {
           silenceStdout();
           process.stderr.write = (() => true) as any;
           try {
-            embedderInstance = await (pipeline as any)('feature-extraction', MODEL_ID, {
-              device: device,
-              dtype: 'fp32',
-            });
+            embedderInstance = await withHfDownloadRetry(() =>
+              pipeline('feature-extraction', MODEL_ID, {
+                device: device,
+                dtype: 'fp32',
+                session_options: {
+                  logSeverityLevel: 3,
+                  intraOpNumThreads: embeddingConfig.threads,
+                  interOpNumThreads: 1,
+                  executionMode: 'sequential',
+                },
+              }),
+            );
           } finally {
             restoreStdout();
             process.stderr.write = realStderrWrite;
           }
-          console.error(`GitNexus: Embedding model loaded (${device})`);
+          logger.info({ device }, 'GitNexus: Embedding model loaded');
           return embedderInstance!;
-        } catch {
+        } catch (deviceError) {
+          // Network errors and circuit-open errors are not device-specific —
+          // they will fail the same way on every device. Rethrow immediately
+          // with actionable HF_ENDPOINT guidance rather than silently falling
+          // back to the next device.
+          const errMsg = deviceError instanceof Error ? deviceError.message : String(deviceError);
+          if (isHfDownloadFailure(errMsg)) {
+            const endpointHint = process.env.HF_ENDPOINT
+              ? `The configured endpoint (${process.env.HF_ENDPOINT}) may be unreachable.`
+              : `huggingface.co may be unreachable from your network.\n` +
+                `  Set HF_ENDPOINT to a mirror and retry:\n` +
+                `    HF_ENDPOINT=https://hf-mirror.com gitnexus analyze --embeddings\n` +
+                `    (Windows: set HF_ENDPOINT=https://hf-mirror.com && gitnexus analyze --embeddings)`;
+            throw new Error(`Failed to download embedding model: ${errMsg}\n  ${endpointHint}`);
+          }
           if (device === 'cpu') throw new Error('Failed to load embedding model');
         }
       }

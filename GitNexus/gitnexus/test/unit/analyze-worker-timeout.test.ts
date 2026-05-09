@@ -14,6 +14,8 @@ vi.mock('../../src/storage/repo-manager.js', () => ({
   getStoragePaths: vi.fn(() => ({ storagePath: '.gitnexus', lbugPath: '.gitnexus/lbug' })),
   getGlobalRegistryPath: vi.fn(() => 'registry.json'),
   RegistryNameCollisionError: class RegistryNameCollisionError extends Error {},
+  AnalysisNotFinalizedError: class AnalysisNotFinalizedError extends Error {},
+  assertAnalysisFinalized: vi.fn(async () => undefined),
 }));
 
 vi.mock('../../src/storage/git.js', () => ({
@@ -37,15 +39,20 @@ describe('analyzeCommand worker timeout validation', () => {
   it.each(['0', 'abc', '-5', 'Infinity'])(
     'rejects invalid --worker-timeout value %s before analysis starts',
     async (workerTimeout) => {
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      // Import _captureLogger from the SAME module instance analyze.js will
+      // see — vi.resetModules() in beforeEach invalidates the singleton.
+      const { _captureLogger } = await import('../../src/core/logger.js');
+      const cap = _captureLogger();
       const { analyzeCommand } = await import('../../src/cli/analyze.js');
 
       await analyzeCommand(undefined, { workerTimeout });
 
       expect(process.exitCode).toBe(1);
-      expect(errorSpy).toHaveBeenCalledWith('  --worker-timeout must be at least 1 second.\n');
+      expect(
+        cap.records().some((r) => r.msg === '  --worker-timeout must be at least 1 second.\n'),
+      ).toBe(true);
       expect(runFullAnalysisMock).not.toHaveBeenCalled();
-      errorSpy.mockRestore();
+      cap.restore();
     },
   );
 

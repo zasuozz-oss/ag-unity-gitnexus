@@ -13,13 +13,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // local-backend.ts imports from core/lbug/pool-adapter.js; the mcp/core/lbug-adapter.js
 // re-exports from the same module, so we mock the canonical source.
 // vi.hoisted runs before vi.mock hoisting, making the fns available to both factories.
-const { lbugMocks } = vi.hoisted(() => ({
+const { lbugMocks, platformMocks } = vi.hoisted(() => ({
   lbugMocks: {
     initLbug: vi.fn().mockResolvedValue(undefined),
     executeQuery: vi.fn().mockResolvedValue([]),
     executeParameterized: vi.fn().mockResolvedValue([]),
     closeLbug: vi.fn().mockResolvedValue(undefined),
     isLbugReady: vi.fn().mockReturnValue(true),
+  },
+  platformMocks: {
+    isVectorExtensionSupportedByPlatform: vi.fn().mockReturnValue(true),
   },
 }));
 
@@ -45,12 +48,21 @@ vi.mock('../../src/storage/repo-manager.js', () => ({
 // tests don't shell out to git.
 vi.mock('../../src/core/git-staleness.js', () => ({
   checkStaleness: vi.fn().mockReturnValue({ isStale: false, commitsBehind: 0 }),
+  checkStalenessAsync: vi.fn().mockResolvedValue({ isStale: false, commitsBehind: 0 }),
   checkCwdMatch: vi.fn().mockResolvedValue({ match: 'none' }),
 }));
 
+vi.mock('../../src/core/platform/capabilities.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/core/platform/capabilities.js')>();
+  return {
+    ...actual,
+    isVectorExtensionSupportedByPlatform: platformMocks.isVectorExtensionSupportedByPlatform,
+  };
+});
+
 // Also mock the search modules to avoid loading onnxruntime
 vi.mock('../../src/core/search/bm25-index.js', () => ({
-  searchFTSFromLbug: vi.fn().mockResolvedValue([]),
+  searchFTSFromLbug: vi.fn().mockResolvedValue({ results: [], ftsAvailable: true }),
 }));
 
 vi.mock('../../src/mcp/core/embedder.js', () => ({
@@ -60,6 +72,7 @@ vi.mock('../../src/mcp/core/embedder.js', () => ({
 
 import { LocalBackend } from '../../src/mcp/local/local-backend.js';
 import { listRegisteredRepos, cleanupOldKuzuFiles } from '../../src/storage/repo-manager.js';
+import { _captureLogger } from '../../src/core/logger.js';
 import {
   initLbug,
   executeQuery,
@@ -157,6 +170,7 @@ describe('LocalBackend.callTool', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    platformMocks.isVectorExtensionSupportedByPlatform.mockReturnValue(true);
     backend = new LocalBackend();
     setupSingleRepo();
     await backend.init();
@@ -179,6 +193,79 @@ describe('LocalBackend.callTool', () => {
     const result = await backend.callTool('query', { query: 'auth' });
     expect(result).toHaveProperty('processes');
     expect(result).toHaveProperty('definitions');
+  });
+
+  it('includes FTS-unavailable warning when ftsAvailable is false (#1403)', async () => {
+    const { searchFTSFromLbug } = await import('../../src/core/search/bm25-index.js');
+    vi.mocked(searchFTSFromLbug).mockResolvedValueOnce({ results: [], ftsAvailable: false });
+    (executeParameterized as any).mockResolvedValue([]);
+
+    const result = await backend.callTool('query', { query: 'ProcessActivity' });
+
+    expect(result).toHaveProperty('warning');
+    expect((result as any).warning).toMatch(/gitnexus analyze --force/);
+  });
+
+  it('does not include warning when ftsAvailable is true with zero results', async () => {
+    const { searchFTSFromLbug } = await import('../../src/core/search/bm25-index.js');
+    vi.mocked(searchFTSFromLbug).mockResolvedValueOnce({ results: [], ftsAvailable: true });
+    (executeParameterized as any).mockResolvedValue([]);
+
+    const result = await backend.callTool('query', { query: 'nonexistent' });
+
+    expect(result).not.toHaveProperty('warning');
+  });
+
+  it('skips vector index query when VECTOR is unsupported by the platform', async () => {
+    const cap = _captureLogger();
+    platformMocks.isVectorExtensionSupportedByPlatform.mockReturnValue(false);
+    (executeQuery as any).mockImplementation(async (_repoId: string, cypher: string) => {
+      if (cypher.includes('COUNT(*) AS cnt')) return [{ cnt: 1 }];
+      if (cypher.includes('MATCH (e:CodeEmbedding)')) return [];
+      return [];
+    });
+    (executeParameterized as any).mockResolvedValue([]);
+
+    try {
+      await backend.callTool('query', { query: 'auth' });
+
+      const queries = (executeQuery as any).mock.calls.map(
+        ([, cypher]: [string, string]) => cypher,
+      );
+      expect(queries.some((cypher: string) => cypher.includes('QUERY_VECTOR_INDEX'))).toBe(false);
+      expect(
+        queries.some(
+          (cypher: string) =>
+            cypher.includes('RETURN e.nodeId AS nodeId') &&
+            cypher.includes('e.embedding AS embedding'),
+        ),
+      ).toBe(true);
+      expect(
+        cap
+          .records()
+          .some((r) =>
+            String(r.msg ?? '').includes(
+              'GitNexus [query:vector]: VECTOR extension not supported on this platform',
+            ),
+          ),
+      ).toBe(true);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it('issues vector index query when VECTOR is supported by the platform', async () => {
+    platformMocks.isVectorExtensionSupportedByPlatform.mockReturnValue(true);
+    (executeQuery as any).mockImplementation(async (_repoId: string, cypher: string) => {
+      if (cypher.includes('COUNT(*) AS cnt')) return [{ cnt: 1 }];
+      return [];
+    });
+    (executeParameterized as any).mockResolvedValue([]);
+
+    await backend.callTool('query', { query: 'auth' });
+
+    const queries = (executeQuery as any).mock.calls.map(([, cypher]: [string, string]) => cypher);
+    expect(queries.some((cypher: string) => cypher.includes('QUERY_VECTOR_INDEX'))).toBe(true);
   });
 
   it('query tool returns error for empty query', async () => {
@@ -775,7 +862,7 @@ describe('LocalBackend.resolveRepo', () => {
       hint: '⚠️ stale sibling clone',
     });
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cap = _captureLogger();
     try {
       await backend.init();
 
@@ -786,13 +873,15 @@ describe('LocalBackend.resolveRepo', () => {
       await backend.resolveRepo();
       await backend.resolveRepo();
 
-      const drift = errSpy.mock.calls.filter((c) => String(c[0]).includes('stale sibling clone'));
+      const drift = cap
+        .records()
+        .filter((r) => String(r.msg ?? '').includes('stale sibling clone'));
       expect(drift).toHaveLength(1);
       // checkCwdMatch should also only run once — the cache check
       // happens BEFORE the shellout-heavy match call.
       expect(checkCwdMatch).toHaveBeenCalledTimes(1);
     } finally {
-      errSpy.mockRestore();
+      cap.restore();
       (checkCwdMatch as any).mockResolvedValue({ match: 'none' });
     }
   });

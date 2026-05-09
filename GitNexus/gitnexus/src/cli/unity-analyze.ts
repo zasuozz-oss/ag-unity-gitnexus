@@ -231,11 +231,11 @@ export const unityAnalyzeCommand = async (
   const { analyzeCommand } = await import('./analyze.js');
   const shouldForceAnalyze = Boolean(
     options?.force ||
-      options?.embeddings ||
-      options?.dropEmbeddings ||
-      options?.resetConfig ||
-      configChanged ||
-      hasUnityRelevantChanges(repoPath),
+    options?.embeddings ||
+    options?.dropEmbeddings ||
+    options?.resetConfig ||
+    configChanged ||
+    hasUnityRelevantChanges(repoPath),
   );
   await analyzeCommand(repoPath, {
     force: shouldForceAnalyze,
@@ -248,5 +248,6 @@ export const unityAnalyzeCommand = async (
     maxFileSize: options?.maxFileSize,
     workerTimeout: options?.workerTimeout,
     ignoreFilter: unityIgnoreFilter,
+    projectType: 'unity',
   });
 };
