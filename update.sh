@@ -52,7 +52,9 @@ sync_dir() {
   shift 2
   # remaining args are --exclude patterns
 
-  if command -v rsync &>/dev/null; then
+  # On Windows, rsync often fails with drive paths (e.g. C:).
+  # Use Python sync for stability.
+  if command -v rsync &>/dev/null && [ "$OS" != "windows" ]; then
     rsync -a --delete "$@" "$src" "$dst"
   else
     # Fallback: remove destination then copy, respecting excludes

@@ -51,7 +51,8 @@ detect_python() {
 sync_skill_dir() {
   local src="$1"
   local dst="$2"
-  if command -v rsync &>/dev/null; then
+  # On Windows, rsync often fails with drive paths.
+  if command -v rsync &>/dev/null && [ "$OS" != "windows" ]; then
     rsync -a "$src" "$dst"
   else
     cp -r "$src"* "$dst/" 2>/dev/null || cp -r "$src". "$dst/" 2>/dev/null || true
@@ -219,8 +220,8 @@ install_skills_to() {
     local skill_name
     skill_name="$(basename "$skill_dir")"
     mkdir -p "$target_dir/$skill_name"
-    # Use rsync if available, otherwise cp -r
-    if command -v rsync &>/dev/null; then
+    # Use rsync if available and not on Windows, otherwise cp -r
+    if command -v rsync &>/dev/null && [ "$OS" != "windows" ]; then
       rsync -a "$skill_dir/" "$target_dir/$skill_name/"
     else
       cp -r "$skill_dir"* "$target_dir/$skill_name/" 2>/dev/null || true
