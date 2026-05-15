@@ -378,12 +378,18 @@ if "projectType?:" not in run_analyze:
         "src/core/run-analyze.ts",
     )
 if "{ ignoreFilter: options.ignoreFilter }" not in run_analyze:
-    old = """  const pipelineResult = await runPipelineFromRepo(repoPath, (p) => {
-    const phaseLabel = PHASE_LABELS[p.phase] || p.phase;
-    const scaled = Math.round(p.percent * 0.6);
-    const message = p.detail ? `${p.message || phaseLabel} (${p.detail})` : p.message || phaseLabel;
-    progress(p.phase, scaled, message);
-  });"""
+    old = """  const pipelineResult = await runPipelineFromRepo(
+    repoPath,
+    (p) => {
+      const phaseLabel = PHASE_LABELS[p.phase] || p.phase;
+      const scaled = Math.round(p.percent * 0.6);
+      const message = p.detail
+        ? `${p.message || phaseLabel} (${p.detail})`
+        : p.message || phaseLabel;
+      progress(p.phase, scaled, message);
+    },
+    { parseCache },
+  );"""
     new = """  const pipelineResult = await runPipelineFromRepo(
     repoPath,
     (p) => {
@@ -394,7 +400,7 @@ if "{ ignoreFilter: options.ignoreFilter }" not in run_analyze:
         : p.message || phaseLabel;
       progress(p.phase, scaled, message);
     },
-    { ignoreFilter: options.ignoreFilter },
+    { parseCache, ignoreFilter: options.ignoreFilter },
   );"""
     if old not in run_analyze:
         raise SystemExit("Cannot patch run-analyze.ts: runPipelineFromRepo marker not found")
@@ -412,7 +418,7 @@ analyze = analyze.replace(
     " * skill generation (--skills), summary output, and process.exit().",
     " * backward-compatible --skills handling, summary output, and process.exit().",
 )
-analyze = analyze.replace("  getStoragePaths,\n  getGlobalRegistryPath,\n", "  getGlobalRegistryPath,\n")
+# analyze = analyze.replace("  getStoragePaths,\n  getGlobalRegistryPath,\n", "  getGlobalRegistryPath,\n")
 analyze = analyze.replace(
     "// Note: --skills is handled after runFullAnalysis using the returned pipelineResult.",
     "// Note: --skills is kept as a backward-compatible no-op. GitNexus skills are\n"
@@ -497,27 +503,27 @@ if install_start != -1:
     if install_end == -1:
         raise SystemExit("Cannot patch ai-context.ts: installSkills end marker not found")
     ai_context = ai_context[:install_start] + ai_context[install_end:]
-project_install_block = """  // Install skills to .claude/skills/gitnexus/
-  const installedSkills = await installSkills(repoPath);
-  if (installedSkills.length > 0) {
-    createdFiles.push(`.claude/skills/gitnexus/ (${installedSkills.length} skills)`);
-  }
-
-"""
-ai_context = ai_context.replace(project_install_block, "")
+project_install_block = """  // Install skills to .claude/skills/gitnexus/ (unless --skip-skills)
+  if (!options?.skipSkills) {
+    const installedSkills = await installSkills(repoPath);
+    if (installedSkills.length > 0) {
+      createdFiles.push(`.claude/skills/gitnexus/ (${installedSkills.length} skills)`);
+    }
+  } else {"""
+ai_context = ai_context.replace(project_install_block, "  /* Skills installation patched out */\n  if (false) {")
 
 # --- Add projectType support to AIContextOptions ---
 if "projectType?:" not in ai_context:
     ai_context = ai_context.replace(
-        "  noStats?: boolean;\n}",
-        "  noStats?: boolean;\n  /** Project type hint (e.g. 'unity') — changes re-index command in generated content. */\n  projectType?: string;\n}",
+        "  skipSkills?: boolean;\n}",
+        "  skipSkills?: boolean;\n  /** Project type hint (e.g. 'unity') — changes re-index command in generated content. */\n  projectType?: string;\n}",
     )
 
 # --- Add projectType param to generateGitNexusContent ---
 if "projectType?:" not in ai_context.split("function generateGitNexusContent")[1].split("): string")[0] if "function generateGitNexusContent" in ai_context else "":
     ai_context = ai_context.replace(
-        "  noStats?: boolean,\n): string {",
-        "  noStats?: boolean,\n  projectType?: string,\n): string {",
+        "  skipSkills?: boolean,\n): string {",
+        "  skipSkills?: boolean,\n  projectType?: string,\n): string {",
     )
 
 # --- Replace hardcoded 'gitnexus analyze' with projectType-aware command ---
@@ -535,8 +541,8 @@ if "const analyzeCmd =" not in ai_context:
 # --- Pass projectType through generateAIContextFiles ---
 if "options?.projectType" not in ai_context:
     ai_context = ai_context.replace(
-        "    groupNames,\n    options?.noStats,\n  );",
-        "    groupNames,\n    options?.noStats,\n    options?.projectType,\n  );",
+        "    options?.skipSkills,\n  );",
+        "    options?.skipSkills,\n    options?.projectType,\n  );",
     )
 
 write("src/cli/ai-context.ts", ai_context)
