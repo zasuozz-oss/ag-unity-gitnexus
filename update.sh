@@ -248,6 +248,14 @@ def replace_once(text: str, old: str, new: str, file_name: str) -> str:
         return text
     return text.replace(old, new, 1)
 
+unity_analyze = read("src/cli/unity-analyze.ts")
+unity_analyze = unity_analyze.replace("  noStats?: boolean;\n", "  stats?: boolean;\n")
+unity_analyze = unity_analyze.replace(
+    "    noStats: options?.noStats,\n",
+    "    stats: options?.stats,\n",
+)
+write("src/cli/unity-analyze.ts", unity_analyze)
+
 index = read("src/cli/index.ts")
 unity_block = """// --- Unity Project Tools -------------------------------------------------
 const unity = program.command('unity').description('Unity project tools');
