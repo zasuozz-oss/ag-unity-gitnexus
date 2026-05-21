@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="$SCRIPT_DIR/GitNexus/gitnexus-web"
 
 cleanup() {
+  trap - EXIT INT TERM # fix terminated loop
   echo -e "\n${CYAN}Shutting down...${NC}"
   kill 0 2>/dev/null
   wait 2>/dev/null

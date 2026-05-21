@@ -62,7 +62,7 @@ export interface UnityAnalyzeOptions {
   dropEmbeddings?: boolean;
   skills?: boolean;
   skipAgentsMd?: boolean;
-  noStats?: boolean;
+  stats?: boolean;
   resetConfig?: boolean;
   verbose?: boolean;
   maxFileSize?: string;
@@ -243,7 +243,7 @@ export const unityAnalyzeCommand = async (
     dropEmbeddings: options?.dropEmbeddings,
     skills: options?.skills,
     skipAgentsMd: options?.skipAgentsMd,
-    noStats: options?.noStats,
+    stats: options?.stats,
     verbose: options?.verbose,
     maxFileSize: options?.maxFileSize,
     workerTimeout: options?.workerTimeout,
