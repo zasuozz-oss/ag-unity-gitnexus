@@ -233,6 +233,7 @@ apply_unity_command_patch() {
 
   $PYTHON - "$GITNEXUS_CLI_DIR" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 root = Path(sys.argv[1])
@@ -386,33 +387,22 @@ if "projectType?:" not in run_analyze:
         "src/core/run-analyze.ts",
     )
 if "{ ignoreFilter: options.ignoreFilter }" not in run_analyze:
-    old = """  const pipelineResult = await runPipelineFromRepo(
-    repoPath,
-    (p) => {
-      const phaseLabel = PHASE_LABELS[p.phase] || p.phase;
-      const scaled = Math.round(p.percent * 0.6);
-      const message = p.detail
-        ? `${p.message || phaseLabel} (${p.detail})`
-        : p.message || phaseLabel;
-      progress(p.phase, scaled, message);
-    },
-    { parseCache },
-  );"""
-    new = """  const pipelineResult = await runPipelineFromRepo(
-    repoPath,
-    (p) => {
-      const phaseLabel = PHASE_LABELS[p.phase] || p.phase;
-      const scaled = Math.round(p.percent * 0.6);
-      const message = p.detail
-        ? `${p.message || phaseLabel} (${p.detail})`
-        : p.message || phaseLabel;
-      progress(p.phase, scaled, message);
-    },
-    { parseCache, ignoreFilter: options.ignoreFilter },
-  );"""
-    if old not in run_analyze:
+    pattern = re.compile(
+        r"(\s*const pipelineResult = await runPipelineFromRepo\(\n"
+        r"(?:(?!\n\s*\);\n).)*?"
+        r"\n\s*)\{([^{}]*\bparseCache\b[^{}]*)\}(\s*,\n\s*\);)",
+        re.DOTALL,
+    )
+
+    def add_ignore_filter(match: re.Match[str]) -> str:
+        options = match.group(2).strip()
+        if "ignoreFilter:" in options:
+            return match.group(0)
+        return f"{match.group(1)}{{ {options}, ignoreFilter: options.ignoreFilter }}{match.group(3)}"
+
+    run_analyze, replacements = pattern.subn(add_ignore_filter, run_analyze, count=1)
+    if replacements == 0:
         raise SystemExit("Cannot patch run-analyze.ts: runPipelineFromRepo marker not found")
-    run_analyze = run_analyze.replace(old, new, 1)
 # Patch generateAIContextFiles call to pass projectType
 if "projectType: options.projectType" not in run_analyze:
     run_analyze = run_analyze.replace(
